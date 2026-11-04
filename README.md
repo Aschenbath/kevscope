@@ -42,6 +42,10 @@ PRIORITY INVERSION  control (rtdemo 352275/1) (prio 50) waited on sensor (rtdemo
 
 On the `good` trace it reports no inversion, and the worst `MsgSend` takes 2.26 ms.
 
+The same moment in Perfetto (`kevscope convert`): control is blocked in `MsgSend -> sensor`. Sensor is serving it at priority 10 when logger (priority 30) preempts it, so sensor turns *Runnable* and logger takes CPU 0. The `kevscope findings` track marks the inversion.
+
+![Priority inversion in Perfetto](docs/perfetto-inversion.png)
+
 ## Use it
 
 ```sh
