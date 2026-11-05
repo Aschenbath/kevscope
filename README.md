@@ -2,6 +2,8 @@
 
 **See why a QNX real-time thread missed its deadline. Open a QNX kernel trace in Perfetto, and let kevscope point at the priority inversion.**
 
+Demo video (2 min): https://youtu.be/bcoGZ2ccpls
+
 QNX's `tracelogger` records every context switch, message and kernel call into a `.kev` file. Until now the only way to read one was the Momentics System Profiler. kevscope is a small host tool (Python 3.9+, standard library only) that:
 
 - **decodes `.kev` files** without the QNX SDP. The decoder is checked event by event against QNX's own `traceprinter`: 32,302 of 32,302 events match on the two bundled traces, and thread, process and message fields are compared value by value.
