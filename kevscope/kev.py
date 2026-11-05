@@ -207,9 +207,9 @@ KER_EXIT_BIT, KER_WIDE_BIT = 0x80, 0x200
 
 SYSTEM_NAMES = {1: "RESERVED", 2: "PATHMGR_OPEN", 3: "APS_NAME", 4: "APS_BUDGETS", 5: "APS_BNKR",
                 6: "MMAP", 7: "MUNMAP", 8: "MAPNAME", 9: "ADDRESS", 10: "FUNC_ENTER",
-                11: "FUNC_EXIT", 12: "SLOG", 13: "DEFRAG_START", 14: "RUNSTATE", 15: "POWER",
+                11: "FUNC_EXIT", 12: "SLOG2", 13: "DEFRAG_START", 14: "RUNSTATE", 15: "POWER",
                 16: "IPI", 17: "PAGEWAIT", 18: "TIMER", 19: "DEFRAG_END", 20: "PROFILE",
-                22: "APS_PSTATS", 23: "APS_OSTATS", 24: "APS_INFO", 25: "APS_JOIN",
+                21: "MAPNAME_64", 22: "APS_PSTATS", 23: "APS_OSTATS", 24: "APS_INFO", 25: "APS_JOIN",
                 26: "APS_THREAD", 27: "APS_PROCESS", 28: "SCHED_CONF", 29: "IST_ATTACH",
                 30: "IST_DETACH", 31: "PCTRACE", 32: "SEND_IPI"}
 INT_NAMES = {7: "INT_DELIVER"}

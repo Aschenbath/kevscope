@@ -69,6 +69,20 @@ class Message:
     replied: int = None    # REPLY_MESSAGE / MSG_ERROR time
     error: bool = False
     flow: int = 0
+    destination_pid: int = None  # rcvid is scoped to this receiving process
+    replier: tuple = None        # may differ from the thread that received it
+    issues: set = field(default_factory=set)
+    reply_started: int = None    # client entered REPLY after the kernel accepted its request
+
+    @property
+    def accepted(self):
+        known = [at for at in (self.reply_started, self.received) if at is not None]
+        return min(known) if known else None
+
+    @property
+    def service_complete(self):
+        return (self.server is not None and self.received is not None and self.replied is not None
+                and self.sent <= self.accepted <= self.received <= self.replied and not self.issues)
 
 
 # mutex flags kept in the count word of a sync object (sys/target_nto.h)
@@ -143,7 +157,18 @@ def build(trace):
 
     running = {}           # cpu -> (key, since, prio)
     switches, wakeups = [], []
-    messages, open_by_rcvid = [], {}
+    messages, open_by_client = [], {}
+    open_by_destination = defaultdict(list)
+
+    def forget_message(message):
+        if open_by_client.get(message.client) is message:
+            del open_by_client[message.client]
+        key = (message.destination_pid, message.rcvid)
+        remaining = [m for m in open_by_destination[key] if m is not message]
+        if remaining:
+            open_by_destination[key] = remaining
+        else:
+            del open_by_destination[key]
     flow_seq = 0
     last_sync_call = {}    # thread key -> (call, words) of its last mutex/condvar kernel call
     last_unlock = {}
@@ -170,10 +195,14 @@ def build(trace):
                 if prio is None and th.changes:
                     prio, policy = th.changes[-1][2], th.changes[-1][3]
                 th.changes.append((ev.t, code, prio, policy))
+                pending_message = open_by_client.get(th.key)
+                if code == kev.STATES.index("REPLY") and pending_message is not None and pending_message.reply_started is None:
+                    pending_message.reply_started = ev.t
                 w_open = open_wait.get(th.key)
                 if w_open is not None and code != ST_MUTEX:
                     w_open.end = ev.t
-                    hit = last_unlock.get((w_open.waiter[0], w_open.sync)) if w_open.sync is not None else None
+                    private = not ((w_open.flags or 0) & SYNC_SHARED)
+                    hit = last_unlock.get((w_open.waiter[0], w_open.sync)) if w_open.sync is not None and private else None
                     if hit and w_open.start <= hit[0] <= ev.t:
                         w_open.released_by = hit[1]
                     del open_wait[th.key]
@@ -226,29 +255,57 @@ def build(trace):
             actor = running.get(ev.cpu)
             actor_key = actor[0] if actor else None
             code, w = ev.code, ev.words
-            rcvid = w[0] if w else 0
+            if len(w) < 2:
+                continue
             if code == kev.COMM_SMSG and actor_key:
+                previous = open_by_client.get(actor_key)
+                if previous is not None:
+                    previous.issues.add("message_restarted")
+                    forget_message(previous)
                 flow_seq += 1
-                m = Message(client=actor_key, rcvid=rcvid, sent=ev.t, flow=flow_seq)
+                m = Message(client=actor_key, rcvid=w[0], destination_pid=w[1], sent=ev.t, flow=flow_seq)
                 messages.append(m)
-                open_by_rcvid[rcvid] = m
+                key = (m.destination_pid, m.rcvid)
+                for previous in open_by_destination[key]:
+                    previous.issues.add("message_id_collision")
+                    m.issues.add("message_id_collision")
+                open_by_destination[key].append(m)
+                open_by_client[actor_key] = m
             elif code == kev.COMM_RMSG:
-                m = open_by_rcvid.get(rcvid)
-                if m is not None and m.received is None:
-                    m.received = ev.t
+                pending = open_by_destination.get((w[1], w[0]), [])
+                if len(pending) == 1:
+                    m = pending[0]
+                    if actor_key is None or actor_key[0] != m.destination_pid:
+                        m.issues.add("message_receive_context")
+                    elif m.received is not None:
+                        m.issues.add("message_repeated_receive")
+                    else:
+                        m.received, m.server = ev.t, actor_key
             elif code in (kev.COMM_REPLY, kev.COMM_ERROR):
-                m = open_by_rcvid.pop(rcvid, None)
+                # Unlike SND_MESSAGE/REC_MESSAGE, these payloads identify the client tid and pid.
+                m = open_by_client.get((w[1], w[0]))
                 if m is not None:
+                    if actor_key is None or actor_key[0] != m.destination_pid:
+                        m.issues.add("message_reply_mismatch")
+                        continue
                     m.replied = ev.t
                     m.error = code == kev.COMM_ERROR
-                    m.server = actor_key
+                    m.replier = actor_key
+                    if m.server is None:
+                        m.server = actor_key
+                        if not m.error:
+                            m.issues.add("message_missing_receive")
+                    elif m.server != actor_key:
+                        m.issues.add("message_handoff")
+                    forget_message(m)
 
     for cpu, (key, since, prio) in running.items():
         threads[key].runs.append((since, end, cpu, prio))
     for th in threads.values():
         th.runs.sort()
     for w in mutex_waits:
-        w.owner = owner_thread(threads, w.owner_raw, w.waiter[0])
+        private_pid = None if (w.flags or 0) & SYNC_SHARED else w.waiter[0]
+        w.owner = owner_thread(threads, w.owner_raw, private_pid)
     return Model(trace, threads, processes, messages, switches, wakeups, start, end, mutex_waits)
 
 
@@ -260,8 +317,8 @@ def owner_thread(threads, raw, near_pid=None):
     if v == 0 or raw >= 0xFFFFFF00:
         return None
     pid15, tid = v >> 16, v & 0xFFFF
-    if near_pid is not None and (near_pid & 0x7FFF) == pid15 and (near_pid, tid) in threads:
-        return (near_pid, tid)
+    if near_pid is not None:
+        return (near_pid, tid) if (near_pid & 0x7FFF) == pid15 and (near_pid, tid) in threads else None
     found = [k for k in threads if k[1] == tid and (k[0] & 0x7FFF) == pid15]
     return found[0] if len(found) == 1 else None
 

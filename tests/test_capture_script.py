@@ -38,3 +38,13 @@ def test_build_failure_or_timeout_restores_snippets_and_does_not_boot(tmp_path, 
     for name, body in originals.items():
         assert (snippets / name).read_text() == body
     assert not list((tmp_path / 'output').glob('.kevscope-run.*'))
+
+
+@pytest.mark.parametrize('modes', [['unknown'], ['ipc-bad', 'ipc-bad'], ['bad;echo-unwanted']])
+def test_bad_or_duplicate_modes_stop_before_accessing_the_sdk(tmp_path, modes):
+    env = {**os.environ, 'QNX_SDP_ENV': str(tmp_path / 'missing-sdk')}
+    result = subprocess.run(['bash', str(ROOT / 'demo/run-capture.sh'), str(tmp_path / 'out'), *modes],
+                            env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 2
+    assert 'capture mode' in result.stderr and 'missing-sdk' not in result.stderr
+    assert not (tmp_path / 'out').exists()

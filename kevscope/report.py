@@ -46,6 +46,8 @@ class Channel:
     inversions: list = field(default_factory=list)
     server_prios: set = field(default_factory=set)
     client_prios: set = field(default_factory=set)
+    queue_waits: list = field(default_factory=list)
+    service_waits: list = field(default_factory=list)
 
 
 def analyze(mdl, schedule=None, waiters=None):
@@ -62,13 +64,20 @@ def analyze(mdl, schedule=None, waiters=None):
             ch = channels[(msg.client, msg.server)] = Channel(msg.client, msg.server)
         wait = msg.replied - msg.sent
         ch.waits.append(wait)
+        if msg.received is not None and msg.sent <= msg.received <= msg.replied:
+            ch.queue_waits.append(msg.accepted - msg.sent)
+            ch.service_waits.append(msg.replied - msg.accepted)
 
         _, client_prio = client.state_at(msg.sent)
         client_prio = client_prio or 0
         ch.client_prios.add(client_prio)
-        served = list(schedule.runs(server, msg.sent, msg.replied))
+        served = list(schedule.runs(server, msg.accepted if msg.accepted is not None else msg.sent, msg.replied))
         ch.server_prios.update((p or 0) for *_, p in served)
-        evidence = schedule.interference(server, client, msg.sent, msg.replied)
+        if not msg.service_complete:
+            continue
+        # REPLY state proves kernel acceptance before the receiver next gets CPU to log RMSG.
+        # Earlier SEND queueing cannot be assigned to the eventual receiving thread.
+        evidence = schedule.interference(server, client, msg.accepted, msg.replied)
         culprits = culprit_times(evidence)
         stolen = sum(culprits.values())
         if stolen:
@@ -140,6 +149,8 @@ def analyze_mutexes(mdl, schedule=None, waiters=None):
         for h in holders:
             prios.extend(p for _, _, _, p in schedule.runs(h, w.start, w.end) if p is not None)
         lk.owner_prios.update(prios)
+        if (w.flags or 0) & M.SYNC_SHARED:
+            continue  # A virtual address cannot establish shared-object identity across processes.
         if len(holders) != 1:
             schedule.uncertain["ownership_changed"].add((w.waiter, w.start, w.end))
             continue
@@ -231,6 +242,8 @@ def summary(mdl, process=None):
             "culprits": culprit_rows(ch.inversions),
             "worst": {"at_ms": round(ms(worst.message.sent - mdl.start), 3),
                       "blocked_ms": round(ms(worst.wait), 3),
+                      "queue_ms": round(ms(worst.message.accepted - worst.message.sent), 3),
+                      "service_ms": round(ms(worst.message.replied - worst.message.accepted), 3),
                       "stolen_ms": round(ms(worst.stolen), 3), "evidence": evidence_rows(worst)},
         })
     for lk in sorted(locks.values(), key=lambda x: -sum(i.stolen for i in x.inversions)):
@@ -263,12 +276,24 @@ def summary(mdl, process=None):
                         "waiter_prio": max(lk.waiter_prios), "owner_prios": sorted(lk.owner_prios),
                         "inversions": len(lk.inversions)})
     channels = []
+
+    def phase_stats(values):
+        values = [ms(x) for x in values]
+        return {"count": len(values),
+                "p50": round(percentile(values, 50), 3) if values else None,
+                "p99": round(percentile(values, 99), 3) if values else None,
+                "max": round(max(values), 3) if values else None}
+
     for ch in sorted(chans.values(), key=lambda c: -len(c.waits)):
         w = [ms(x) for x in ch.waits]
         channels.append({"client": mdl.threads[ch.client].label, "server": mdl.threads[ch.server].label,
+                         "cross_process": ch.client[0] != ch.server[0],
+                         "client_cpus": sorted({r[2] for r in mdl.threads[ch.client].runs}),
+                         "server_cpus": sorted({r[2] for r in mdl.threads[ch.server].runs}),
                          "messages": len(w), "p50_ms": round(percentile(w, 50), 3),
                          "p99_ms": round(percentile(w, 99), 3), "max_ms": round(max(w), 3),
                          "client_prio": max(ch.client_prios), "server_prios": sorted(ch.server_prios),
+                         "queue_ms": phase_stats(ch.queue_waits), "service_ms": phase_stats(ch.service_waits),
                          "inversions": len(ch.inversions)})
     latency = []
     for key, vals in lat.items():
@@ -334,6 +359,7 @@ def render(s, top=8):
         w = f["worst"]
         out.append(f"  Worst: at +{w['at_ms']:.3f} ms the client was blocked {w['blocked_ms']:.2f} ms, "
                    f"{w['stolen_ms']:.2f} ms of it behind lower-priority threads.")
+        out.append(f"  Phases: {w['queue_ms']:.3f} ms before acceptance, {w['service_ms']:.3f} ms accepted to reply.")
         out.append("  Likely cause: the server does not inherit its client's priority. Check for a channel")
         out.append("  created with _NTO_CHF_FIXED_PRIORITY, or a server that sets its own priority.")
         out.append("")
@@ -343,6 +369,10 @@ def render(s, top=8):
         flag = f"  <- {c['inversions']} inversions" if c["inversions"] else ""
         out.append(f"  {c['messages']:5d}  p50 {c['p50_ms']:7.3f}  p99 {c['p99_ms']:7.3f}  max {c['max_ms']:7.3f} ms"
                    f"  {c['client']} -> {c['server']}{flag}")
+        if c['queue_ms']['count']:
+            out.append(f"         phase maxima: queue {c['queue_ms']['max']:.3f} ms; "
+                       f"accepted to reply {c['service_ms']['max']:.3f} ms "
+                       f"({c['queue_ms']['count']} paired samples; maxima may be from different calls)")
     if s["mutexes"]:
         if s["channels"]:
             out.append("")

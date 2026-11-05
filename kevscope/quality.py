@@ -1,4 +1,7 @@
 """Trace integrity and analysis coverage, kept separate from positive findings."""
+from collections import Counter
+
+from .model import SYNC_SHARED
 
 
 def assess(mdl, schedule, waiters=None):
@@ -25,6 +28,18 @@ def assess(mdl, schedule, waiters=None):
 
     messages = [m for m in mdl.messages if waiters is None or m.client in waiters]
     completed_messages = sum(m.replied is not None and m.server is not None for m in messages)
+    message_issues = Counter(code for m in messages for code in m.issues)
+    issue_descriptions = {
+        "message_restarted": "client calls were superseded before a reply was captured",
+        "message_id_collision": "calls share an outstanding destination pid/rcvid; reception is ambiguous",
+        "message_receive_context": "receive events lack the expected receiving process context",
+        "message_repeated_receive": "calls have multiple receive events without a known handoff",
+        "message_reply_mismatch": "reply events lack the expected destination process context",
+        "message_missing_receive": "completed calls lack a receive event; their service interval is unknown",
+        "message_handoff": "calls were received and replied to by different threads; ownership transfer is unknown",
+    }
+    for code, count in sorted(message_issues.items()):
+        warn(code, f"{count} {issue_descriptions[code]}. These calls are excluded from inversion attribution.")
     waits = [w for w in mdl.mutex_waits if waiters is None or w.waiter in waiters]
     completed_waits = [w for w in waits if w.end is not None and not w.started_before_trace]
     no_address = sum(w.sync is None for w in completed_waits)
@@ -37,6 +52,9 @@ def assess(mdl, schedule, waiters=None):
     unresolved = sum(w.sync is not None and not w.holders for w in completed_waits)
     if unresolved:
         warn("unresolved_mutex_owner", f"The owner of {unresolved} completed mutex waits could not be resolved.")
+    shared = sum(bool((w.flags or 0) & SYNC_SHARED) for w in completed_waits)
+    if shared:
+        warn("shared_mutex_identity", f"{shared} process-shared mutex waits lack a cross-process object identity. Virtual addresses and truncated owner pids do not establish ownership; these waits are excluded from inversion attribution.")
 
     descriptions = {
         "unbounded_ready": "READY intervals lack an execution boundary needed to establish the CPU",
@@ -56,10 +74,15 @@ def assess(mdl, schedule, waiters=None):
         "coverage": {
             "messages_observed": len(messages), "messages_completed": completed_messages,
             "messages_unfinished": len(messages) - completed_messages,
+            "messages_received": sum(m.received is not None for m in messages),
+            "messages_service_complete": sum(m.service_complete for m in messages),
+            "messages_errored": sum(m.error for m in messages),
+            "messages_with_issues": sum(bool(m.issues) for m in messages),
             "mutex_waits_observed": len(waits), "mutex_waits_completed": len(completed_waits),
             "mutex_waits_unfinished": len(waits) - len(completed_waits),
             "mutex_waits_left_censored": sum(w.started_before_trace for w in waits),
             "mutex_waits_without_address": no_address, "mutex_waits_without_owner": no_owner,
+            "mutex_waits_shared_identity_unknown": shared,
             "uncertain_intervals": {code: len(intervals) for code, intervals in sorted(schedule.uncertain.items()) if intervals},
         },
         "method": "Instantaneous priorities; READY intervals bracketed by executions on the same CPU.",

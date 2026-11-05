@@ -87,6 +87,8 @@ def _quality(s, name=None):
     coverage = (f"{tr['events']:,} events · {tr['duration_ms']:.3f} ms · {tr['cpus']} CPUs<br>"
                 f"{c['messages_completed']}/{c['messages_observed']} messages and "
                 f"{c['mutex_waits_completed']}/{c['mutex_waits_observed']} mutex waits have captured boundaries.")
+    if c['messages_observed']:
+        coverage += f"<br>{c['messages_service_complete']} messages have correlated service evidence."
     if analysis["warnings"]:
         rows = ''.join(f"<li>{e(w['message'])}</li>" for w in analysis["warnings"])
         return f'<aside class="notice"><strong>{e(label)} · {e(analysis["status"])}</strong><ul>{rows}</ul><div class="coverage">{coverage}</div></aside>'
@@ -134,6 +136,9 @@ def _finding(f, opened=False):
         "Check for _NTO_CHF_FIXED_PRIORITY or a server that changes its own priority. "
         "With QNX's default message priority inheritance, the server can run at its client's priority.")
     culprit = f["culprits"][0] if f["culprits"] else {"thread": "unknown", "prio": "?"}
+    phases = (f'<p class="scope">Worst-call phases: {f["worst"]["queue_ms"]:.3f} ms before acceptance; '
+              f'{f["worst"]["service_ms"]:.3f} ms accepted to reply. '
+              'Acceptance is established by client REPLY state or the receive event.</p>' if kind == 'message' else '')
     rows = ''.join(f'<tr><td class="number">{x["start_ms"]:.6f}–{x["end_ms"]:.6f}</td>'
                    f'<td class="number">{x["cpu"]}</td><td>{e(x["thread"])}</td>'
                    f'<td class="number">{x["owner_prio"]} ≤ {x["running_prio"]} &lt; {x["waiter_prio"]}</td></tr>'
@@ -141,7 +146,7 @@ def _finding(f, opened=False):
     return f'''<details class="finding" data-kind="{kind}" {'open' if opened else ''}>
 <summary><div><div class="kind">{kind} priority inversion</div><h3>{e(waiter)} → {e(owners)}</h3>
 <span class="scope">{f['affected']} of {total} waits affected · {f['stolen_ms_total']:.3f} ms attributed delay</span></div></summary>
-<div class="detail"><p>The dependency was READY at lower priority while other work ran on the same observed CPU.</p>
+<div class="detail"><p>The dependency was READY at lower priority while other work ran on the same observed CPU.</p>{phases}
 <div class="chain"><div class="role"><small>WAITER · PRIORITY {waiter_prio}</small>{e(waiter)}</div><span>waits for →</span>
 <div class="role"><small>DEPENDENCY · PRIORITY {e(', '.join(map(str, owner_prios)))}</small>{e(owners)}</div>
 <span>delayed by →</span><div class="role ran"><small>TOP CONTRIBUTOR · PRIORITY {e(culprit['prio'])}</small>{e(culprit['thread'])}</div></div>
@@ -166,10 +171,16 @@ def _latencies(s):
         for row in entries:
             name = row["client"] if kind == "Message" else row["waiter"]
             count = row["messages"] if kind == "Message" else row["waits"]
-            rows.append(f'<tr><td>{e(name)}<small>{kind} · {count} waits</small></td><td class="number">{row["p99_ms"]:.3f}</td><td class="number">{row["max_ms"]:.3f}</td></tr>')
+            phases = ''
+            if kind == 'Message' and row['queue_ms']['count']:
+                phases = (f'<small>Phase maxima: {row["queue_ms"]["max"]:.3f} ms before acceptance; '
+                          f'{row["service_ms"]["max"]:.3f} ms accepted to reply.</small>')
+                cpus = f'Client CPUs {row["client_cpus"]}; server CPUs {row["server_cpus"]}'
+                phases += f'<small>{"Cross-process" if row["cross_process"] else "Same-process"} · {e(cpus)}</small>'
+            rows.append(f'<tr><td>{e(name)}<small>{kind} · {count} waits</small>{phases}</td><td class="number">{row["p99_ms"]:.3f}</td><td class="number">{row["max_ms"]:.3f}</td></tr>')
     cpu = ''.join(f'<tr><td>{e(x["thread"])}</td><td class="number">{x["ms"]:.2f}</td><td class="number">{x["share"]*100:.1f}%</td></tr>' for x in s["cpu"][:8])
     return ('<section class="two"><div><h2>Wait distribution</h2><div class="comparison"><table class="compact"><thead><tr><th>Waiter</th><th>p99 ms</th><th>Max ms</th></tr></thead>'
-            f'<tbody>{"".join(rows)}</tbody></table></div></div><div><h2>CPU time</h2><div class="comparison"><table class="compact"><thead><tr><th>Thread</th><th>ms</th><th>1 CPU share</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table></div><p class="scope">Phase maxima may describe different calls. CPUs are observed across this capture.</p></div><div><h2>CPU time</h2><div class="comparison"><table class="compact"><thead><tr><th>Thread</th><th>ms</th><th>1 CPU share</th></tr></thead>'
             f'<tbody>{cpu}</tbody></table></div><p class="scope">Share is relative to one CPU for the capture duration.</p></div></section>')
 
 
@@ -198,11 +209,23 @@ def render_comparison(result, baseline_name="baseline.kev", candidate_name="cand
         def wait_cell(x, before=False):
             if not x:
                 return '—'
+            phases = (f'<small>Before acceptance: {x["queue_ms"]["max"]:.3f}<br>'
+                      f'Accepted → reply: {x["service_ms"]["max"]:.3f}</small>'
+                      if x['queue_ms'] and x['queue_ms']['count'] else '')
             return (f'<span class="number">{x["max_ms"]:.3f}</span><small>p99 {x["p99_ms"]:.3f}</small>'
-                    f'<span class="bar {"before" if before else ""}"><i style="width:{100*x["max_ms"]/scale:.2f}%"></i></span>')
+                    f'{phases}<span class="bar {"before" if before else ""}"><i style="width:{100*x["max_ms"]/scale:.2f}%"></i></span>')
         state = row["change"].replace('_', ' ') if row["state"] == "matched" else row["state"].replace('_', ' ')
         protocol = f'<small>{e(old["protocol"])} → {e(new["protocol"])}</small>' if old and new and old["protocol"] else ''
-        rows.append(f'<tr data-kind="{row["kind"]}"><td class="dependency">{e(row["dependency"])}<small>{row["kind"]}</small>{protocol}</td>'
+        topology = ''
+        if row['kind'] == 'message':
+            descriptions = []
+            for x in (old, new):
+                if x:
+                    cpus = ', '.join(map(str, x['client_cpus'])) or '?'
+                    server_cpus = ', '.join(map(str, x['server_cpus'])) or '?'
+                    descriptions.append(f'{"Cross-process" if x["cross_process"] else "Same-process"} · client CPU {cpus} → server CPU {server_cpus}')
+            topology = '<small>' + '<br>Then: '.join(e(t) for t in dict.fromkeys(descriptions)) + '</small>'
+        rows.append(f'<tr data-kind="{row["kind"]}"><td class="dependency">{e(row["dependency"])}<small>{row["kind"]}</small>{protocol}{topology}</td>'
                     f'<td>{cell(old)}</td><td>{cell(new)}</td><td>{wait_cell(old, True)}</td><td>{wait_cell(new)}</td>'
                     f'<td><span class="state {color}">{e(state)}</span></td></tr>')
     direction = result["direction"]
@@ -217,7 +240,8 @@ def render_comparison(result, baseline_name="baseline.kev", candidate_name="cand
         body += '<aside class="notice"><strong>Comparison limits</strong><ul>' + ''.join(f'<li>{e(w)}</li>' for w in result["warnings"]) + '</ul></aside>'
     body += ('<section><div class="section-head"><div><h2>What changed</h2><p>Sample counts stay visible. Disappearing work is never labeled fixed.</p></div>'
              f'{_filters()}</div><div class="comparison"><table><thead><tr><th>Dependency</th><th>Baseline waits</th><th>Candidate waits</th><th>Baseline max ms</th><th>Candidate max ms</th><th>Inversion rate</th></tr></thead>'
-             f'<tbody>{"".join(rows)}</tbody></table></div><p class="scope">{e(result["scope"])}</p></section>')
+             f'<tbody>{"".join(rows)}</tbody></table></div><p class="scope">{e(result["scope"])}</p>'
+             '<p class="scope">Phase maxima may come from different calls. CPUs are observed across each capture.</p></section>')
     body += f'<section class="two"><div>{_quality(a, baseline_name)}</div><div>{_quality(b, candidate_name)}</div></section>'
     body += _findings(a, "Baseline: why it was flagged") + _findings(b, "Candidate: remaining findings")
     body += f'<p class="scope">{e(result["method"])}</p>'

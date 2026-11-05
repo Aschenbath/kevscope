@@ -1,0 +1,2 @@
+topology: control pid 753683 CPU 1; sensor pid 761877 CPU 0; logger CPU 0
+rtdemo ipc-bad: 300 cycles, 55 over the 5 ms budget, mean 3.92 ms, worst 9.89 ms

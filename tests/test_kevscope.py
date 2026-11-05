@@ -1,10 +1,13 @@
-"""Tests against four real traces captured on QNX 8.0 (QEMU x86_64) with demo/rtdemo.c.
+"""Tests against six real traces captured on QNX 8.0 (QEMU x86_64) with demo/rtdemo.c.
 
 inversion.kev        rtdemo bad:        sensor channel uses _NTO_CHF_FIXED_PRIORITY (no priority inheritance)
 inherit.kev          rtdemo good:       default channel, sensor inherits control's priority 50
-mutex-inversion.kev  rtdemo mutex-bad:  shared mutex created with PTHREAD_PRIO_NONE
+mutex-inversion.kev  rtdemo mutex-bad:  process-private mutex created with PTHREAD_PRIO_NONE
 mutex-inherit.kev    rtdemo mutex-good: default mutex (PTHREAD_PRIO_INHERIT)
+ipc-inversion.kev    rtdemo ipc-bad:    separate client/server processes on CPUs 1/0, fixed priority
+ipc-inherit.kev      rtdemo ipc-good:   same topology, default channel priority inheritance
 """
+import gzip
 import struct
 from pathlib import Path
 
@@ -16,7 +19,7 @@ from traceprinter_ref import compare
 DATA = Path(__file__).parent / "data"
 
 
-TRACES = ("inversion", "inherit", "mutex-inversion", "mutex-inherit")
+TRACES = ("inversion", "inherit", "mutex-inversion", "mutex-inherit", "ipc-inversion", "ipc-inherit")
 
 
 @pytest.fixture(scope="module", params=TRACES)
@@ -45,6 +48,21 @@ def test_header(models):
     assert t.header["TRACE_SYS_RELEASE"] == "8.0.0"
     assert t.cpus == 2 and t.cycles_per_sec > 10**9
     assert t.dropped == 0 and t.partial == 0
+
+
+def test_fixture_wall_clock_metadata_is_redacted(name):
+    data = (DATA / f"{name}.kev").read_bytes()
+    header, offset = kev.parse_header(data)
+    assert header['TRACE_DATE'] == header['TRACE_BOOT_DATE'] == 'redacted'
+    # QNX 8.0 x86_64 syspage qtime: time-of-day adjustment and boot UTC seconds.
+    qtime_offset, qtime_size = struct.unpack_from('<HH', data, offset + 20)
+    assert qtime_size >= 24
+    qtime = data[offset + qtime_offset:offset + qtime_offset + qtime_size]
+    assert qtime[8:16] == bytes(8) and qtime[20:24] == bytes(4)
+    reference = (DATA / f"{name}.traceprinter.txt.gz").read_bytes()
+    assert reference[4:8] == bytes(4)  # gzip mtime
+    text = gzip.decompress(reference).decode('utf-8')
+    assert 'TRACE_DATE:: redacted' in text and 'TRACE_BOOT_DATE:: redacted' in text
 
 
 def test_names_and_threads(models):
@@ -251,8 +269,10 @@ def test_perfetto_output_structure(models):
                 slice_names += [v.decode() for ef, v in _fields(pv) if ef == 23]
     assert switches == len(m.switches)
     assert names == sum(1 for th in m.threads.values() if not th.idle)
-    assert slice_names.count("priority inversion") == len(inv) == 27
-    assert slice_names.count("MsgSend -> sensor") >= 95
+    # Two replies from procnto used to terminate unrelated control -> sensor calls.
+    # Matching the actual client pid/tid retains all 100 calls and all 29 findings.
+    assert slice_names.count("priority inversion") == len(inv) == 29
+    assert slice_names.count("MsgSend -> sensor") == 100
 
 
 def test_perfetto_output_marks_mutex_waits(models):

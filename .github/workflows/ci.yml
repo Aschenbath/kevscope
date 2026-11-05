@@ -22,6 +22,8 @@ jobs:
       - run: python -m pytest -q
       - name: Exercise installed CLI and generate an offline comparison
         run: kevscope compare tests/data/mutex-inversion.kev tests/data/mutex-inherit.kev --process rtdemo --strict --fail-on-regression --html comparison.html
+      - name: Exercise cross-process IPC comparison
+        run: kevscope compare tests/data/ipc-inversion.kev tests/data/ipc-inherit.kev --process rtdemo --fail-on-regression --html ipc.html
       - name: Check capture scripts and portable transfer helper
         if: runner.os == 'Linux'
         run: |

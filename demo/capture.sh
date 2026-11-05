@@ -1,10 +1,15 @@
 #!/bin/sh
 # Runs on the QNX guest at boot: trace the demo in each mode and send the traces to the host.
-# Usage: capture.sh [modes...]   (default: bad good mutex-bad mutex-good)
+# Usage: capture.sh [modes...]   (default: all six modes, including cross-process SMP)
 set -eu
 D=/data/var/kevscope
 sleep 4
-MODES="${*:-bad good mutex-bad mutex-good}"
+MODES="${*:-bad good mutex-bad mutex-good ipc-bad ipc-good}"
+for mode in $MODES; do
+    case "$mode" in bad|good|mutex-bad|mutex-good|ipc-bad|ipc-good) ;;
+        *) echo "unknown capture mode: $mode" >&2; exit 2 ;;
+    esac
+done
 for mode in $MODES; do
     echo "--- capture $mode"
     "$D/rtdemo" "$mode" 3 > "/dev/shmem/$mode.txt" &

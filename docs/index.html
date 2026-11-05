@@ -24,27 +24,30 @@ section{margin:38px 0}h2{font-size:24px;font-weight:500;letter-spacing:-.6px;mar
 @media print{body{background:white}.wrap{padding:0}.filters{display:none}.hero{padding-top:20px}h1{font-size:38px}.finding{break-inside:avoid}.comparison{overflow:visible}.comparison table{min-width:0}.notice{background:white}.two{display:block}footer{padding-bottom:0}}
 </style></head>
 <body><div class="wrap"><nav aria-label="Report identity"><div class="brand">kev<i>scope</i></div>
-<div class="nav-note">QNX KERNEL TRACE DIAGNOSTICS<br>Offline report · v0.2.0</div></nav>
+<div class="nav-note">QNX KERNEL TRACE DIAGNOSTICS<br>Offline report · v0.3.0</div></nav>
 <main><header class="hero"><div><span class="eyebrow">QNX Global Hackathon / Developer Tooling &amp; Host Tools</span>
 <h1>Replay a real<br><em>QNX diagnosis.</em></h1><p>Explore kernel traces from a controlled QNX 8.0 workload. See what delayed the control thread, inspect the scheduling evidence, and compare the fix.</p></div>
 <div class="hero-side"><span class="pill good">Interactive examples</span><p>No account, SDK or installation needed to explore these reports.</p>
 <p><a href="https://github.com/Aschenbath/kevscope">Source, installation &amp; full tutorial ↗</a></p></div></header>
-<div class="metrics"><div class="metric"><span class="eyebrow">Captured on QNX</span><strong>4 traces</strong><small>QNX 8.0 · QEMU x86_64</small></div>
-<div class="metric"><span class="eyebrow">Decoder validation</span><strong>56,758</strong><small>Events matched against QNX traceprinter</small></div>
+<div class="metrics"><div class="metric"><span class="eyebrow">Captured on QNX</span><strong>6 traces</strong><small>QNX 8.0 · QEMU x86_64</small></div>
+<div class="metric"><span class="eyebrow">Decoder validation</span><strong>81,380</strong><small>Events matched against QNX traceprinter</small></div>
 <div class="metric"><span class="eyebrow">Runtime dependencies</span><strong>0</strong><small>Python 3.9+ · Standard library only</small></div></div>
-<section><h2>Choose a dependency</h2><p class="muted">Both examples use control (priority 50), sensor (10), and logger (30), pinned to one CPU.</p>
-<div class="two"><article class="finding"><div class="detail"><span class="eyebrow">mutex priority inheritance</span>
-<h2>A mutex owner that cannot finish</h2><p>6/29 affected waits → 0/38<br>
+<section><h2>Choose a dependency</h2><p class="muted">Each workload uses control (priority 50), sensor (10), and logger (30). Compare channel or mutex priority inheritance, including IPC across processes and CPUs.</p>
+<div class="two" style="grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:20px"><article class="finding"><div class="detail"><span class="eyebrow">ipc priority inheritance</span>
+<h2>A reply from another process</h2><p>Control on CPU 1; a separate sensor process and logger on CPU 0.</p><p>25/100 affected waits → 0/100<br>
+Longest wait: <strong>9.119 → 2.495 ms</strong></p>
+<a href="examples/ipc.html">Explore the ipc comparison →</a></div></article><article class="finding"><div class="detail"><span class="eyebrow">mutex priority inheritance</span>
+<h2>A mutex owner that cannot finish</h2><p>Three threads in one process on CPU 0.</p><p>6/29 affected waits → 0/38<br>
 Longest wait: <strong>5.277 → 1.439 ms</strong></p>
 <a href="examples/mutex.html">Explore the mutex comparison →</a></div></article><article class="finding"><div class="detail"><span class="eyebrow">message priority inheritance</span>
-<h2>A server delayed by the logger</h2><p>27/98 affected waits → 0/99<br>
+<h2>A server delayed by the logger</h2><p>Three threads in one process on CPU 0.</p><p>29/100 affected waits → 0/100<br>
 Longest wait: <strong>8.219 → 2.260 ms</strong></p>
 <a href="examples/message.html">Explore the message comparison →</a></div></article></div></section>
 <section><h2>Try it on the captured data</h2><p>Clone the repository and run these commands from its root:</p>
 <pre class="hint" style="overflow-x:auto"><code>python -m pip install .
-kevscope compare tests/data/mutex-inversion.kev tests/data/mutex-inherit.kev --process rtdemo --html comparison.html</code></pre>
+kevscope compare tests/data/ipc-inversion.kev tests/data/ipc-inherit.kev --process rtdemo --html comparison.html</code></pre>
 <p>Open <code>comparison.html</code> in a browser. Each report is a single file and works offline. For your own application, capture with <code>tracelogger -w</code>, then use <code>kevscope report</code> or <code>kevscope convert</code> for Perfetto.</p></section>
-<aside class="notice"><strong>What the evidence establishes</strong><p>These are controlled examples, not a guarantee for every workload. The detector excludes unresolved CPU migrations and missing priority evidence. A report with no identified inversion does not prove that every real-time deadline was met.</p></aside></main><footer><span>kevscope · Local analysis. No uploads or external resources.</span>
+<aside class="notice"><strong>What the evidence establishes</strong><p>These are controlled examples, not a guarantee for every workload. The detector excludes unresolved CPU migrations, unbounded READY intervals, missing priority evidence, and process-shared locks without object identity. A report with no identified inversion does not prove that every real-time deadline was met.</p></aside></main><footer><span>kevscope · Local analysis. No uploads or external resources.</span>
 <span>Capture → Diagnose → Compare → Verify</span></footer></div><script>
 document.querySelectorAll('[data-filter]').forEach(button => {
   button.addEventListener('click', () => {

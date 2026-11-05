@@ -1,10 +1,21 @@
 #!/usr/bin/env bash
-# Build, capture four modes, verify transfers, then restore the image snippets.
-# Usage: demo/run-capture.sh [output dir]
+# Build, capture selected modes, verify transfers, then restore the image snippets.
+# Usage: demo/run-capture.sh [output dir] [mode ...]
 # Optional: KEVSCOPE_VM, QNX_SDP_ENV, KEVSCOPE_BUILD_TIMEOUT, KEVSCOPE_CAPTURE_TIMEOUT.
 set -eo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$REPO/traces}"
+MODES=("${@:2}")
+if [[ ${#MODES[@]} == 0 ]]; then MODES=(bad good mutex-bad mutex-good ipc-bad ipc-good); fi
+declare -A SEEN_MODES=()
+for mode in "${MODES[@]}"; do
+    case "$mode" in bad|good|mutex-bad|mutex-good|ipc-bad|ipc-good) ;;
+        *) echo "unknown capture mode: $mode" >&2; exit 2 ;;
+    esac
+    [[ -z "${SEEN_MODES[$mode]:-}" ]] || { echo "duplicate capture mode: $mode" >&2; exit 2; }
+    SEEN_MODES[$mode]=1
+done
+EXPECTED_FILES=$((${#MODES[@]} * 2))
 VM="${KEVSCOPE_VM:-$HOME/qnxvm}"
 BUILD_TIMEOUT="${KEVSCOPE_BUILD_TIMEOUT:-180}"
 CAPTURE_TIMEOUT="${KEVSCOPE_CAPTURE_TIMEOUT:-180}"
@@ -69,7 +80,7 @@ cat > "$RUN_DIR/data_files.custom.installed" <<EOF
 [uid=0 gid=0 perms=755] var/kevscope/capture.sh=$VM/payload/capture.sh
 EOF
 cat > "$RUN_DIR/post_start.custom.installed" <<EOF
-/data/var/kevscope/capture.sh
+/data/var/kevscope/capture.sh ${MODES[*]}
 EOF
 for file in data_files.custom post_start.custom; do
     if [[ -e "$SNIPPETS/$file" || -L "$SNIPPETS/$file" ]]; then mv -- "$SNIPPETS/$file" "$RUN_DIR/$file.original"; fi
@@ -82,7 +93,7 @@ if ! timeout "$BUILD_TIMEOUT" mkqnximage --noprompt --build > "$OUT/build.log" 2
     echo "image build failed or timed out; QEMU was not started" >&2
     exit 1
 fi
-python3 "$REPO/demo/recv.py" "$OUT" 8 --timeout "$CAPTURE_TIMEOUT" --ready-file "$RUN_DIR/receiver.ready" > "$OUT/receiver.log" 2>&1 &
+python3 "$REPO/demo/recv.py" "$OUT" "$EXPECTED_FILES" --timeout "$CAPTURE_TIMEOUT" --ready-file "$RUN_DIR/receiver.ready" > "$OUT/receiver.log" 2>&1 &
 RECV_PID=$!
 for ((attempt=0; attempt<100; attempt++)); do
     [[ -s "$RUN_DIR/receiver.ready" ]] && break
@@ -119,5 +130,5 @@ if [[ "$done_capture" != 1 ]]; then
 fi
 if [[ -n "$RECV_PID" ]] && ! wait "$RECV_PID"; then cat "$OUT/receiver.log" >&2; RECV_PID=""; exit 1; fi
 RECV_PID=""
-grep -E "rtdemo (mutex-)?(good|bad)|--- capture|kevpush|CAPTURE DONE" "$OUT/console.log"
-echo "All eight files verified in $OUT."
+grep -E "rtdemo (mutex-|ipc-)?(good|bad)|--- capture|kevpush|CAPTURE DONE" "$OUT/console.log"
+echo "All $EXPECTED_FILES files verified in $OUT."

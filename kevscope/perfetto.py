@@ -203,7 +203,7 @@ def convert(model, findings=None):
         out.append(_packet(*hdr, m(P_TRACK_EVENT, *parts)))
 
     for msg in model.messages:
-        if msg.server is None or msg.replied is None or msg.server == msg.client:
+        if not msg.service_complete or msg.server == msg.client:
             continue
         client, server = model.threads[msg.client], model.threads[msg.server]
         ct, st = thread_track(msg.client), thread_track(msg.server)
@@ -211,15 +211,16 @@ def convert(model, findings=None):
         event(msg.sent, ct, TYPE_SLICE_BEGIN, f"MsgSend -> {server.name or server.tid}", flows=[flow],
               args=[("server", server.label), ("rcvid", msg.rcvid)])
         event(msg.replied, ct, TYPE_SLICE_END)
-        begin = msg.received if msg.received is not None else msg.sent
+        begin = msg.accepted
         event(begin, st, TYPE_SLICE_BEGIN, f"serve {client.name or client.tid}", ends=[flow],
-              args=[("client", client.label), ("rcvid", msg.rcvid)])
+              args=[("client", client.label), ("rcvid", msg.rcvid),
+                    ("receive_event_delay_us", int(model.ms(msg.received - begin) * 1000))])
         event(msg.replied, st, TYPE_SLICE_END, flows=[flow + 0x1000_0000])
-        event(msg.replied, ct, TYPE_INSTANT, "reply", ends=[flow + 0x1000_0000])
+        event(msg.replied, ct, TYPE_INSTANT, "error reply" if msg.error else "reply", ends=[flow + 0x1000_0000])
 
     for w in model.mutex_waits:
         holders = w.holders
-        if w.end is None or not holders:
+        if w.end is None or not holders or (w.flags or 0) & M.SYNC_SHARED:
             continue
         waiter, holder = model.threads[w.waiter], model.threads[holders[-1]]
         wt, ht = thread_track(w.waiter), thread_track(holder.key)

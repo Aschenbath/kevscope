@@ -22,6 +22,9 @@ def _dependencies(mdl, summary):
                 "affected_pct": 100 * entry["inversions"] / count if count else 0,
                 "p50_ms": entry["p50_ms"], "p99_ms": entry["p99_ms"], "max_ms": entry["max_ms"],
                 "protocol": entry.get("protocol"),
+                "queue_ms": entry.get("queue_ms"), "service_ms": entry.get("service_ms"),
+                "cross_process": entry.get("cross_process", False),
+                "client_cpus": entry.get("client_cpus"), "server_cpus": entry.get("server_cpus"),
             })
     return grouped
 
