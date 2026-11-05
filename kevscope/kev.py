@@ -14,6 +14,7 @@ The high 32 bits of the clock come from CONTROL/TIME events, one stream per CPU.
 import re
 import struct
 from dataclasses import dataclass, field
+from pathlib import Path
 
 # event classes (_TRACE_*_C >> 10)
 EMPTY, CONTROL, KER_CALL, INT, PR_TH, SYSTEM, USER, COMM, QUIP, SEC, QVM, PMU = range(12)
@@ -78,6 +79,7 @@ class Kev:
     events: list
     dropped: int = 0          # CONTROL/DROPPED records seen
     partial: int = 0          # combined events cut off by a buffer boundary
+    trailing_bytes: int = 0   # a cut-off final 16-byte record
 
     def ns(self, t):
         """Cycles since the first event, in nanoseconds."""
@@ -100,17 +102,25 @@ def parse_header(data):
 
 
 def read(path_or_bytes):
-    data = path_or_bytes if isinstance(path_or_bytes, (bytes, bytearray)) else open(path_or_bytes, "rb").read()
+    data = path_or_bytes if isinstance(path_or_bytes, (bytes, bytearray)) else Path(path_or_bytes).read_bytes()
     header, off = parse_header(data)
     if header.get("TRACE_LITTLE_ENDIAN", "TRUE") != "TRUE":
         raise KevError("big-endian traces are not supported")
     if "16 byte" not in header.get("TRACE_ENCODING", "16 byte"):
         raise KevError(f"unsupported encoding: {header.get('TRACE_ENCODING')}")
-    off += int(header.get("TRACE_SYSPAGE_LEN", "0"))
-    cps = int(header.get("TRACE_CYCLES_PER_SEC", "0"))
+    try:
+        syspage_len = int(header.get("TRACE_SYSPAGE_LEN", "0"))
+        cps = int(header.get("TRACE_CYCLES_PER_SEC", "0"))
+        ncpu = int(header.get("TRACE_CPU_NUM", "1"))
+    except ValueError as exc:
+        raise KevError("invalid numeric trace header") from exc
+    if syspage_len < 0 or off + syspage_len > len(data):
+        raise KevError("invalid or truncated syspage")
+    off += syspage_len
     if cps <= 0:
         raise KevError("missing TRACE_CYCLES_PER_SEC")
-    ncpu = int(header.get("TRACE_CPU_NUM", "1"))
+    if not 1 <= ncpu <= 64:
+        raise KevError("TRACE_CPU_NUM must be between 1 and 64 for this event encoding")
 
     msb = {}        # cpu -> high 32 bits of the clock
     last_lsb = {}   # cpu -> previous low 32 bits, to catch a wrap between TIME events
@@ -165,7 +175,7 @@ def read(path_or_bytes):
 
     partial += len(pending)
     events.sort(key=lambda e: e.t)          # stable: keeps per-CPU order for equal stamps
-    return Kev(header, cps, ncpu, events, dropped, partial)
+    return Kev(header, cps, ncpu, events, dropped, partial, (len(data) - off) % 16)
 
 
 # kernel call numbers (sys/kercalls.h, QNX 8.0); KER_CALL event code = call | 0x80 on exit | 0x200 wide

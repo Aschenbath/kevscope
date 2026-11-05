@@ -300,6 +300,7 @@ def _event_ts(encoded):
 
 def all_inversions(model):
     """Message-passing and mutex priority inversions, for the findings track."""
-    msgs = [inv for ch in report.analyze(model).values() for inv in ch.inversions]
-    mutexes = [inv for lk in report.analyze_mutexes(model).values() for inv in lk.inversions]
+    schedule = report.Schedule(model)
+    msgs = [inv for ch in report.analyze(model, schedule).values() for inv in ch.inversions]
+    mutexes = [inv for lk in report.analyze_mutexes(model, schedule).values() for inv in lk.inversions]
     return msgs + mutexes

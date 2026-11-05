@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='5' fill='%23086e59'/%3E%3Cpath d='M4 18h5l3-9 5 16 3-10h8' fill='none' stroke='white' stroke-width='2'/%3E%3C/svg%3E"><title>Interactive QNX examples · kevscope</title><style>
+:root{--paper:#f4f3ed;--ink:#182c2a;--muted:#526862;--line:#d4dcd5;--green:#086e59;--red:#bc432d;--amber:#8d5e18;--mono:Consolas,'Liberation Mono',monospace}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.6 'Trebuchet MS',Verdana,sans-serif}
+a{color:var(--green)}button,summary{cursor:pointer}button:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid #bb6633;outline-offset:4px}
+.wrap{max-width:1220px;margin:auto;padding:0 42px}nav{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);padding:23px 0;gap:20px}
+.brand{font:bold 29px Georgia,serif;letter-spacing:-1.5px}.brand i{color:var(--green);font-style:normal}.mono,.eyebrow,th,.pill,.metric strong{font-family:var(--mono)}
+.eyebrow{text-transform:uppercase;letter-spacing:.13em;font-size:11px;color:var(--muted)}.nav-note{font-size:12px;text-align:right;color:var(--muted)}
+.hero{display:grid;grid-template-columns:1.45fr 1fr;gap:60px;padding:48px 0 36px;align-items:end}h1{font-size:clamp(36px,4.6vw,61px);letter-spacing:-2.6px;line-height:1.07;margin:16px 0 20px;font-weight:500}h1 em{font-family:Georgia,serif;color:var(--green);font-weight:normal}
+.hero p{color:var(--muted);max-width:590px;margin:0}.hero-side{border-left:2px solid var(--ink);padding-left:24px}.source{font-family:var(--mono);font-size:13px;overflow-wrap:anywhere;margin:8px 0 15px}.pill{display:inline-block;border:1px solid currentColor;border-radius:3px;padding:4px 9px;font-size:10px;text-transform:uppercase;letter-spacing:.06em}
+.good{color:var(--green)}.bad{color:var(--red)}.caution{color:var(--amber)}.muted{color:var(--muted)}
+.metrics{display:grid;grid-template-columns:repeat(3,1fr);border-top:2px solid var(--ink);border-bottom:1px solid var(--line);margin-bottom:40px}.metric{padding:20px 24px 22px 0;min-width:0}.metric+.metric{padding-left:24px;border-left:1px solid var(--line)}
+.metric strong{display:block;font-size:clamp(25px,3.3vw,44px);font-weight:400;line-height:1.3;letter-spacing:-2px;margin:8px 0}.metric small{display:block;color:var(--muted);font-size:12px}.arrow{font-size:.7em;color:#81918a;margin:0 8px}
+section{margin:38px 0}h2{font-size:24px;font-weight:500;letter-spacing:-.6px;margin:0 0 6px}h3{font-size:17px;margin:0}p{overflow-wrap:anywhere}.section-head{display:flex;justify-content:space-between;align-items:end;gap:20px;margin-bottom:20px}.section-head p{margin:0;color:var(--muted);font-size:13px}
+.filters{display:flex;gap:6px;flex-wrap:wrap}.filters button{background:transparent;border:1px solid var(--line);border-radius:3px;padding:8px 12px;font:12px var(--mono);color:var(--ink)}.filters button[aria-pressed=true]{background:var(--ink);border-color:var(--ink);color:white}
+.notice{border-left:3px solid var(--amber);background:#ece8d9;padding:18px 22px;margin:22px 0;font-size:13px}.notice ul{margin:9px 0 0;padding-left:20px}.notice strong{font-size:14px}.coverage{font:12px/1.7 var(--mono);color:var(--muted);margin-top:12px}.scope{font-size:12px;color:var(--muted);margin-top:12px}
+.finding{border:1px solid var(--line);background:#fcfcf8;margin:12px 0}.finding>summary{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:20px 24px;list-style:none}.finding>summary::-webkit-details-marker{display:none}.finding>summary:after{content:'+';font:25px var(--mono)}.finding[open]>summary:after{content:'−'}.finding>summary>div{flex:1;min-width:0}.finding .kind{font:10px var(--mono);letter-spacing:.13em;text-transform:uppercase;color:var(--red);margin-bottom:5px}.finding .detail{border-top:1px solid var(--line);padding:24px}.finding .detail>p{font-size:14px;margin-top:0}
+.chain{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:20px 0 24px}.role{border-left:3px solid var(--green);padding:5px 14px;background:#edf2eb;font-size:13px;overflow-wrap:anywhere;max-width:100%}.role.ran{border-color:var(--red);background:#f7eae3}.role small{display:block;font:10px var(--mono);color:var(--muted);margin-bottom:3px}.chain>span{font-size:11px;color:var(--muted)}
+.timeline-scroll{overflow-x:auto}.timeline{width:100%;height:auto;display:block;margin:20px 0 4px;background:#f4f5ef}.timeline text{font:11px var(--mono);fill:var(--muted)}.timeline .wait{fill:#bdccc3}.timeline .ready{fill:#d9b575}.timeline .run{fill:var(--red)}
+.evidence-table{overflow-x:auto}.evidence-table summary{font-size:12px;color:var(--green);padding:8px 0}table{border-collapse:collapse;width:100%;font-size:13px}th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:normal}td,th{padding:12px 14px 12px 0;border-bottom:1px solid var(--line);vertical-align:top}td:last-child,th:last-child{padding-right:0}.number{font-family:var(--mono);white-space:nowrap}td small{display:block;color:var(--muted);font-size:11px}.comparison{overflow-x:auto}.comparison table{min-width:700px}.dependency{font-weight:bold;min-width:180px;max-width:330px;overflow-wrap:anywhere}.state{font-size:10px;font-family:var(--mono);text-transform:uppercase;white-space:nowrap}.bar{display:block;height:4px;background:#e0e4dd;margin-top:7px;min-width:80px}.bar i{display:block;height:100%;background:var(--green)}.bar.before i{background:#a68359}.empty{padding:24px;border:1px dashed #aebeb2;color:var(--muted);font-size:14px}.hint{padding:14px 18px;background:#edf2eb;color:#2e5146;font-size:13px}.two{display:grid;grid-template-columns:1fr 1fr;gap:36px}.compact td{font-size:12px}.compact td:first-child{overflow-wrap:anywhere}footer{border-top:1px solid var(--line);padding:24px 0 35px;display:flex;justify-content:space-between;gap:24px;font-size:11px;color:var(--muted)}[hidden]{display:none!important}
+.two>div{min-width:0}
+@media(max-width:760px){.wrap{padding:0 20px}.hero{grid-template-columns:1fr;gap:24px;padding-top:30px}.hero-side{border-left:0;border-top:1px solid var(--line);padding:18px 0 0}h1{letter-spacing:-1.5px}.metrics{grid-template-columns:1fr}.metric{padding:14px 0!important;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:0 14px}.metric+.metric{border-left:0;border-top:1px solid var(--line)}.metric strong{grid-column:2;grid-row:1/3;letter-spacing:-1px;font-size:30px}.metric small{grid-column:1;font-size:10px}.metrics .eyebrow{font-size:10px;letter-spacing:.03em}.section-head{align-items:start;flex-direction:column}.two{grid-template-columns:1fr;gap:12px}.finding>summary{padding:18px 16px}.finding .detail{padding:16px}.chain{gap:9px}.nav-note{max-width:140px}.timeline{min-width:650px}footer{flex-direction:column;gap:8px}}
+@media print{body{background:white}.wrap{padding:0}.filters{display:none}.hero{padding-top:20px}h1{font-size:38px}.finding{break-inside:avoid}.comparison{overflow:visible}.comparison table{min-width:0}.notice{background:white}.two{display:block}footer{padding-bottom:0}}
+</style></head>
+<body><div class="wrap"><nav aria-label="Report identity"><div class="brand">kev<i>scope</i></div>
+<div class="nav-note">QNX KERNEL TRACE DIAGNOSTICS<br>Offline report · v0.2.0</div></nav>
+<main><header class="hero"><div><span class="eyebrow">QNX Global Hackathon / Developer Tooling &amp; Host Tools</span>
+<h1>Replay a real<br><em>QNX diagnosis.</em></h1><p>Explore kernel traces from a controlled QNX 8.0 workload. See what delayed the control thread, inspect the scheduling evidence, and compare the fix.</p></div>
+<div class="hero-side"><span class="pill good">Interactive examples</span><p>No account, SDK or installation needed to explore these reports.</p>
+<p><a href="https://github.com/Aschenbath/kevscope">Source, installation &amp; full tutorial ↗</a></p></div></header>
+<div class="metrics"><div class="metric"><span class="eyebrow">Captured on QNX</span><strong>4 traces</strong><small>QNX 8.0 · QEMU x86_64</small></div>
+<div class="metric"><span class="eyebrow">Decoder validation</span><strong>56,758</strong><small>Events matched against QNX traceprinter</small></div>
+<div class="metric"><span class="eyebrow">Runtime dependencies</span><strong>0</strong><small>Python 3.9+ · Standard library only</small></div></div>
+<section><h2>Choose a dependency</h2><p class="muted">Both examples use control (priority 50), sensor (10), and logger (30), pinned to one CPU.</p>
+<div class="two"><article class="finding"><div class="detail"><span class="eyebrow">mutex priority inheritance</span>
+<h2>A mutex owner that cannot finish</h2><p>6/29 affected waits → 0/38<br>
+Longest wait: <strong>5.277 → 1.439 ms</strong></p>
+<a href="examples/mutex.html">Explore the mutex comparison →</a></div></article><article class="finding"><div class="detail"><span class="eyebrow">message priority inheritance</span>
+<h2>A server delayed by the logger</h2><p>27/98 affected waits → 0/99<br>
+Longest wait: <strong>8.219 → 2.260 ms</strong></p>
+<a href="examples/message.html">Explore the message comparison →</a></div></article></div></section>
+<section><h2>Try it on the captured data</h2><p>Clone the repository and run these commands from its root:</p>
+<pre class="hint" style="overflow-x:auto"><code>python -m pip install .
+kevscope compare tests/data/mutex-inversion.kev tests/data/mutex-inherit.kev --process rtdemo --html comparison.html</code></pre>
+<p>Open <code>comparison.html</code> in a browser. Each report is a single file and works offline. For your own application, capture with <code>tracelogger -w</code>, then use <code>kevscope report</code> or <code>kevscope convert</code> for Perfetto.</p></section>
+<aside class="notice"><strong>What the evidence establishes</strong><p>These are controlled examples, not a guarantee for every workload. The detector excludes unresolved CPU migrations and missing priority evidence. A report with no identified inversion does not prove that every real-time deadline was met.</p></aside></main><footer><span>kevscope · Local analysis. No uploads or external resources.</span>
+<span>Capture → Diagnose → Compare → Verify</span></footer></div><script>
+document.querySelectorAll('[data-filter]').forEach(button => {
+  button.addEventListener('click', () => {
+    const filter = button.dataset.filter;
+    document.querySelectorAll('[data-filter]').forEach(b => b.setAttribute('aria-pressed', String(b === button)));
+    document.querySelectorAll('[data-kind]').forEach(row => { row.hidden = filter !== 'all' && row.dataset.kind !== filter; });
+    const visible = [...document.querySelectorAll('[data-kind]')].filter(row => !row.hidden).length;
+    const status = document.getElementById('filter-status');
+    if (status) status.textContent = visible + ' visible item' + (visible === 1 ? '' : 's');
+  });
+});
+</script></body></html>

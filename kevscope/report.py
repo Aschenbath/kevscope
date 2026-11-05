@@ -2,7 +2,8 @@
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from . import kev, model as M
+from . import kev, model as M, quality
+from .schedule import Schedule, culprit_times
 
 
 def state_spans(th, states, a, b):
@@ -29,10 +30,11 @@ class Inversion:
     """One message whose lower-priority server was kept off the CPU by a thread below the client."""
     message: M.Message
     wait: int                     # cycles the client was blocked
-    server_prio: int              # priority the server actually ran at
+    server_prio: int              # highest READY priority in the attributed intervals
     client_prio: int
     culprits: dict                # thread key -> cycles it ran while the server was ready
     stolen: int                   # sum of culprit time
+    evidence: list = field(default_factory=list)
 
 
 @dataclass
@@ -46,9 +48,12 @@ class Channel:
     client_prios: set = field(default_factory=set)
 
 
-def analyze(mdl):
+def analyze(mdl, schedule=None, waiters=None):
+    schedule = schedule or Schedule(mdl)
     channels = {}
     for msg in mdl.messages:
+        if waiters is not None and msg.client not in waiters:
+            continue
         if msg.server is None or msg.replied is None or msg.server == msg.client:
             continue
         client, server = mdl.threads[msg.client], mdl.threads[msg.server]
@@ -61,26 +66,14 @@ def analyze(mdl):
         _, client_prio = client.state_at(msg.sent)
         client_prio = client_prio or 0
         ch.client_prios.add(client_prio)
-        served = [(s, e, cpu, p) for s, e, cpu, p in server.runs if e > msg.sent and s < msg.replied]
-        server_prio = max((p or 0) for *_, p in served) if served else 0
+        served = list(schedule.runs(server, msg.sent, msg.replied))
         ch.server_prios.update((p or 0) for *_, p in served)
-        server_cpus = {cpu for _, _, cpu, _ in served}
-
-        culprits = defaultdict(int)
-        for a, b, _ in state_spans(server, {kev.ST_READY}, msg.sent, msg.replied):
-            for th in mdl.threads.values():
-                if th.idle or th.key in (msg.client, msg.server):
-                    continue
-                for s, e, cpu, p in th.runs:
-                    if e <= a:
-                        continue
-                    if s >= b:
-                        break
-                    if (not server_cpus or cpu in server_cpus) and (p or 0) < client_prio:
-                        culprits[th.key] += min(e, b) - max(s, a)
+        evidence = schedule.interference(server, client, msg.sent, msg.replied)
+        culprits = culprit_times(evidence)
         stolen = sum(culprits.values())
-        if stolen > 0 and server_prio < client_prio:
-            ch.inversions.append(Inversion(msg, wait, server_prio, client_prio, dict(culprits), stolen))
+        if stolen:
+            ch.inversions.append(Inversion(msg, wait, max(x.owner_prio for x in evidence),
+                                           max(x.waiter_prio for x in evidence), culprits, stolen, evidence))
     return channels
 
 
@@ -89,10 +82,11 @@ class MutexInversion:
     """One mutex wait whose lower-priority owner was kept off the CPU by a thread below the waiter."""
     wait: M.MutexWait
     blocked: int                  # cycles the waiter was MUTEX-blocked
-    owner_prio: int               # highest priority the owner had during the wait
+    owner_prio: int               # highest READY priority in the attributed intervals
     waiter_prio: int
     culprits: dict                # thread key -> cycles it ran while the owner was ready
     stolen: int
+    evidence: list = field(default_factory=list)
 
 
 @dataclass
@@ -118,11 +112,14 @@ def _merge(spans):
     return out
 
 
-def analyze_mutexes(mdl):
+def analyze_mutexes(mdl, schedule=None, waiters=None):
     """Mutex waits grouped by (waiter, mutex), with the waits that were priority inversions."""
+    schedule = schedule or Schedule(mdl)
     locks = {}
     for w in mdl.mutex_waits:
-        if w.end is None or w.sync is None:
+        if waiters is not None and w.waiter not in waiters:
+            continue
+        if w.end is None or w.sync is None or w.started_before_trace:
             continue
         waiter = mdl.threads[w.waiter]
         lk = locks.get((w.waiter, w.sync))
@@ -139,34 +136,19 @@ def analyze_mutexes(mdl):
             continue
         lk.holders.update(w.holders)
 
-        prios, cpus, ready = [], set(), []
+        prios = []
         for h in holders:
-            for a, b, cpu, prio in h.runs:
-                if b > w.start and a < w.end:
-                    prios.append(prio or 0)
-                    cpus.add(cpu)
-            for a, b, prio in state_spans(h, {kev.ST_READY}, w.start, w.end):
-                prios.append(prio or 0)
-                ready.append((a, b))
-        owner_prio = max(prios) if prios else 0
-        lk.owner_prios.add(owner_prio)
-
-        culprits = defaultdict(int)
-        skip = {w.waiter, *w.holders}
-        for a, b in _merge(ready):
-            for th in mdl.threads.values():
-                if th.idle or th.key in skip:
-                    continue
-                for rs, re_, cpu, p in th.runs:
-                    if re_ <= a:
-                        continue
-                    if rs >= b:
-                        break
-                    if (not cpus or cpu in cpus) and (p or 0) < waiter_prio:
-                        culprits[th.key] += min(re_, b) - max(rs, a)
+            prios.extend(p for _, _, _, p in schedule.runs(h, w.start, w.end) if p is not None)
+        lk.owner_prios.update(prios)
+        if len(holders) != 1:
+            schedule.uncertain["ownership_changed"].add((w.waiter, w.start, w.end))
+            continue
+        evidence = schedule.interference(holders[0], waiter, w.start, w.end)
+        culprits = culprit_times(evidence)
         stolen = sum(culprits.values())
-        if stolen > 0 and owner_prio < waiter_prio:
-            lk.inversions.append(MutexInversion(w, w.end - w.start, owner_prio, waiter_prio, dict(culprits), stolen))
+        if stolen:
+            lk.inversions.append(MutexInversion(w, w.end - w.start, max(x.owner_prio for x in evidence),
+                                               max(x.waiter_prio for x in evidence), culprits, stolen, evidence))
     return locks
 
 
@@ -203,62 +185,72 @@ def wake_latency(mdl):
     return out
 
 
-def summary(mdl):
+def summary(mdl, process=None):
     """Everything the text report and --json need, in plain data."""
     ms = mdl.ms
-    chans = analyze(mdl)
-    locks = analyze_mutexes(mdl)
+    waiters = None
+    if process is not None:
+        waiters = {th.key for th in mdl.threads.values()
+                   if str(th.pid) == process or th.process.rsplit("/", 1)[-1] == process}
+        if not waiters:
+            raise kev.KevError(f"no process matches {process!r}; use a process basename or PID")
+    schedule = Schedule(mdl)
+    chans = analyze(mdl, schedule, waiters)
+    locks = analyze_mutexes(mdl, schedule, waiters)
     lat = wake_latency(mdl)
     findings = []
+
+    def culprit_rows(inversions):
+        totals, priorities = defaultdict(int), defaultdict(set)
+        for inv in inversions:
+            for item in inv.evidence:
+                totals[item.thread] += item.end - item.start
+                priorities[item.thread].add(item.running_prio)
+        return [{"thread": mdl.threads[key].label, "prio": max(priorities[key]),
+                 "ms": round(ms(value), 3)} for key, value in sorted(totals.items(), key=lambda item: -item[1])]
+
+    def evidence_rows(inv):
+        return [{"start_ms": round(ms(x.start - mdl.start), 6),
+                 "end_ms": round(ms(x.end - mdl.start), 6),
+                 "cpu": x.cpu, "thread": mdl.threads[x.thread].label,
+                 "owner": mdl.threads[x.owner].label, "owner_prio": x.owner_prio,
+                 "waiter_prio": x.waiter_prio, "running_prio": x.running_prio}
+                for x in inv.evidence]
     for ch in sorted(chans.values(), key=lambda c: -sum(i.stolen for i in c.inversions)):
         if not ch.inversions:
             continue
         client, server = mdl.threads[ch.client], mdl.threads[ch.server]
-        culprit_tot = defaultdict(int)
-        for inv in ch.inversions:
-            for k, v in inv.culprits.items():
-                culprit_tot[k] += v
         worst = max(ch.inversions, key=lambda i: i.wait)
         findings.append({
             "kind": "priority_inversion",
-            "client": client.label, "client_prio": max(ch.client_prios),
-            "server": server.label, "server_prios": sorted(ch.server_prios),
+            "client": client.label, "client_prio": max(i.client_prio for i in ch.inversions),
+            "server": server.label, "server_prios": sorted({i.server_prio for i in ch.inversions}),
             "messages": len(ch.waits), "affected": len(ch.inversions),
             "blocked_ms_total": round(ms(sum(i.wait for i in ch.inversions)), 3),
             "stolen_ms_total": round(ms(sum(i.stolen for i in ch.inversions)), 3),
-            "culprits": [{"thread": mdl.threads[k].label,
-                          "prio": max((p or 0) for *_, p in mdl.threads[k].runs) if mdl.threads[k].runs else 0,
-                          "ms": round(ms(v), 3)}
-                         for k, v in sorted(culprit_tot.items(), key=lambda kv: -kv[1])],
+            "culprits": culprit_rows(ch.inversions),
             "worst": {"at_ms": round(ms(worst.message.sent - mdl.start), 3),
                       "blocked_ms": round(ms(worst.wait), 3),
-                      "stolen_ms": round(ms(worst.stolen), 3)},
+                      "stolen_ms": round(ms(worst.stolen), 3), "evidence": evidence_rows(worst)},
         })
     for lk in sorted(locks.values(), key=lambda x: -sum(i.stolen for i in x.inversions)):
         if not lk.inversions:
             continue
         waiter = mdl.threads[lk.waiter]
-        culprit_tot = defaultdict(int)
-        for inv in lk.inversions:
-            for k, v in inv.culprits.items():
-                culprit_tot[k] += v
         worst = max(lk.inversions, key=lambda i: i.blocked)
         findings.append({
             "kind": "mutex_priority_inversion",
-            "waiter": waiter.label, "waiter_prio": max(lk.waiter_prios),
+            "waiter": waiter.label, "waiter_prio": max(i.waiter_prio for i in lk.inversions),
             "owners": [mdl.threads[k].label for k in sorted(lk.holders)],
             "owner_prios": sorted({i.owner_prio for i in lk.inversions}),
             "mutex": f"0x{lk.sync:x}", "protocol": M.mutex_protocol(lk.flags),
             "waits": len(lk.waits), "affected": len(lk.inversions),
             "blocked_ms_total": round(ms(sum(i.blocked for i in lk.inversions)), 3),
             "stolen_ms_total": round(ms(sum(i.stolen for i in lk.inversions)), 3),
-            "culprits": [{"thread": mdl.threads[k].label,
-                          "prio": max((p or 0) for *_, p in mdl.threads[k].runs) if mdl.threads[k].runs else 0,
-                          "ms": round(ms(v), 3)}
-                         for k, v in sorted(culprit_tot.items(), key=lambda kv: -kv[1])],
+            "culprits": culprit_rows(lk.inversions),
             "worst": {"at_ms": round(ms(worst.wait.start - mdl.start), 3),
                       "blocked_ms": round(ms(worst.blocked), 3),
-                      "stolen_ms": round(ms(worst.stolen), 3)},
+                      "stolen_ms": round(ms(worst.stolen), 3), "evidence": evidence_rows(worst)},
         })
     mutexes = []
     for lk in sorted(locks.values(), key=lambda x: -max(x.waits)):
@@ -280,6 +272,8 @@ def summary(mdl):
                          "inversions": len(ch.inversions)})
     latency = []
     for key, vals in lat.items():
+        if waiters is not None and key not in waiters:
+            continue
         v = [ms(x[0]) for x in vals]
         th = mdl.threads[key]
         latency.append({"thread": th.label, "wakeups": len(v), "p50_ms": round(percentile(v, 50), 3),
@@ -287,18 +281,22 @@ def summary(mdl):
                         "prio": max((x[2] or 0) for x in vals)})
     latency.sort(key=lambda r: -r["max_ms"])
     cpu = []
-    span = mdl.end - mdl.start or 1
+    span = mdl.end - mdl.start
     for th in mdl.threads.values():
+        if waiters is not None and th.key not in waiters:
+            continue
         busy = sum(e - s for s, e, _, _ in th.runs)
         if busy and not th.idle:
-            cpu.append({"thread": th.label, "ms": round(ms(busy), 3), "share": round(busy / span, 4)})
+            cpu.append({"thread": th.label, "ms": round(ms(busy), 3), "share": round(busy / (span or 1), 4)})
     cpu.sort(key=lambda r: -r["ms"])
     t = mdl.trace
     return {
         "trace": {"duration_ms": round(ms(span), 3), "cpus": t.cpus, "events": len(t.events),
                   "dropped_buffers": t.dropped, "partial_events": t.partial,
+                  "trailing_bytes": t.trailing_bytes,
                   "system": f"{t.header.get('TRACE_SYSNAME', '')} {t.header.get('TRACE_SYS_RELEASE', '')}".strip(),
                   "machine": t.header.get("TRACE_MACHINE", "")},
+        "analysis": {**quality.assess(mdl, schedule, waiters), "process": process},
         "findings": findings, "channels": channels, "mutexes": mutexes, "wake_latency": latency, "cpu": cpu,
     }
 
@@ -308,19 +306,26 @@ def render(s, top=8):
     tr = s["trace"]
     out.append(f"kevscope report: {tr['system']} {tr['machine']}, {tr['cpus']} CPUs, "
                f"{tr['duration_ms']:.1f} ms, {tr['events']} events")
-    if tr["dropped_buffers"] or tr["partial_events"]:
-        out.append(f"  warning: {tr['dropped_buffers']} dropped buffers, {tr['partial_events']} cut-off events; "
-                   "results may miss some activity")
+    analysis = s.get("analysis", {})
+    for warning in analysis.get("warnings", []):
+        out.append(f"  warning: {warning['message']}")
+    if analysis:
+        coverage = analysis["coverage"]
+        out.append(f"  coverage: {coverage['messages_completed']}/{coverage['messages_observed']} messages, "
+                   f"{coverage['mutex_waits_completed']}/{coverage['mutex_waits_observed']} mutex waits completed")
     out.append("")
     if not s["findings"]:
-        out.append("No priority inversion found in message passing or mutex waits.")
+        if analysis.get("status", "usable") == "usable":
+            out.append("No priority inversion found in the analyzed message and mutex waits.")
+        else:
+            out.append("No priority inversion established. Review the evidence warnings before drawing a conclusion.")
         out.append("")
     for f in s["findings"]:
         if f["kind"] == "mutex_priority_inversion":
             out += _render_mutex(f)
             continue
         out.append(f"PRIORITY INVERSION  {f['client']} (prio {f['client_prio']}) waited on {f['server']}")
-        out.append(f"  {f['affected']} of {f['messages']} messages affected. The server ran at priority "
+        out.append(f"  {f['affected']} of {f['messages']} messages affected. While READY, the server had priority "
                    f"{', '.join(map(str, f['server_prios']))}, below its priority {f['client_prio']} client,")
         out.append(f"  so lower-priority work ran first: {f['stolen_ms_total']:.1f} ms in total, "
                    f"while the client was blocked {f['blocked_ms_total']:.1f} ms.")
@@ -362,7 +367,7 @@ def render(s, top=8):
 def _render_mutex(f):
     owners = " / ".join(f["owners"])
     out = [f"MUTEX PRIORITY INVERSION  {f['waiter']} (prio {f['waiter_prio']}) waited for a mutex held by {owners}",
-           f"  {f['affected']} of {f['waits']} waits affected. The owner ran at priority "
+           f"  {f['affected']} of {f['waits']} waits affected. While READY, the owner had priority "
            f"{', '.join(map(str, f['owner_prios']))}, below its priority {f['waiter_prio']} waiter,",
            f"  so lower-priority work ran first: {f['stolen_ms_total']:.1f} ms in total, "
            f"while the waiter was blocked {f['blocked_ms_total']:.1f} ms."]

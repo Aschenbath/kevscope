@@ -4,3 +4,5 @@ traces/
 *.pftrace
 *.egg-info/
 build/
+/comparison.html
+/report.html

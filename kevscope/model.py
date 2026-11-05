@@ -100,6 +100,7 @@ class MutexWait:
     released_by: tuple = None # thread whose SyncMutexUnlock ended the wait
     via_condvar: bool = False # re-acquiring the mutex after a condvar wake-up
     flow: int = 0
+    started_before_trace: bool = False
 
     @property
     def holders(self):
@@ -178,7 +179,9 @@ def build(trace):
                     del open_wait[th.key]
                 elif w_open is None and code == ST_MUTEX:
                     flow_seq += 1
-                    w_new = MutexWait(th.key, ev.t, flow=flow_seq)
+                    initial_state = all(change[1] == kev.ST_CREATE for change in th.changes[:-1])
+                    w_new = MutexWait(th.key, ev.t, flow=flow_seq, started_before_trace=initial_state)
+                    w_new.via_condvar = len(th.changes) > 1 and th.changes[-2][1] == kev.STATES.index("CONDVAR")
                     call, args = last_sync_call.pop(th.key, (None, None))
                     if call == KER_MUTEX_LOCK and len(args) >= 4:
                         w_new.sync = args[1] << 32 | args[0]
