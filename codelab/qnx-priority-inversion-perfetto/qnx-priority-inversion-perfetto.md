@@ -4,7 +4,7 @@ summary: Capture a QNX 8.0 kernel trace, open it in Perfetto with kevscope, and 
 categories: debugging, tools, real-time
 tags: intermediate
 difficulty: 3
-status: draft
+status: published
 authors: Nash Aschenbath
 feedback_link: https://github.com/Aschenbath/kevscope/issues
 
