@@ -1,7 +1,9 @@
-"""Tests against two real traces captured on QNX 8.0 (QEMU x86_64) with demo/rtdemo.c.
+"""Tests against four real traces captured on QNX 8.0 (QEMU x86_64) with demo/rtdemo.c.
 
-inversion.kev  rtdemo bad:  sensor channel uses _NTO_CHF_FIXED_PRIORITY (no priority inheritance)
-inherit.kev    rtdemo good: default channel, sensor inherits control's priority 50
+inversion.kev        rtdemo bad:        sensor channel uses _NTO_CHF_FIXED_PRIORITY (no priority inheritance)
+inherit.kev          rtdemo good:       default channel, sensor inherits control's priority 50
+mutex-inversion.kev  rtdemo mutex-bad:  shared mutex created with PTHREAD_PRIO_NONE
+mutex-inherit.kev    rtdemo mutex-good: default mutex (PTHREAD_PRIO_INHERIT)
 """
 import struct
 from pathlib import Path
@@ -14,20 +16,27 @@ from traceprinter_ref import compare
 DATA = Path(__file__).parent / "data"
 
 
-@pytest.fixture(scope="module", params=["inversion", "inherit"])
+TRACES = ("inversion", "inherit", "mutex-inversion", "mutex-inherit")
+
+
+@pytest.fixture(scope="module", params=TRACES)
 def name(request):
     return request.param
 
 
 @pytest.fixture(scope="module")
 def models():
-    return {n: model.build(kev.read(DATA / f"{n}.kev")) for n in ("inversion", "inherit")}
+    return {n: model.build(kev.read(DATA / f"{n}.kev")) for n in TRACES}
+
+
+def _thread(m, name):
+    return next(th for th in m.threads.values() if th.name == name and th.process.endswith("rtdemo"))
 
 
 def test_decoder_matches_qnx_traceprinter(name):
     r = compare(DATA / f"{name}.kev", DATA / f"{name}.traceprinter.txt.gz", verbose=False)
-    assert r["reference"] == r["decoded"] == r["matched"] > 15000
-    assert r["checked"] > 4000
+    assert r["reference"] == r["decoded"] == r["matched"] > 12000
+    assert r["checked"] > 3500
     assert not r["problems"]
 
 
@@ -73,6 +82,114 @@ def test_report_is_clean_with_inheritance(models):
     ch = s["channels"][0]
     assert ch["client"].startswith("control") and ch["server"].startswith("sensor")
     assert ch["max_ms"] < 3.0      # rtdemo good: worst cycle 2.96 ms
+
+
+def test_report_kinds_stay_apart(models):
+    assert [f["kind"] for f in report.summary(models["inversion"])["findings"]] == ["priority_inversion"]
+    assert [f["kind"] for f in report.summary(models["mutex-inversion"])["findings"]] == ["mutex_priority_inversion"]
+
+
+# ---- mutexes ---------------------------------------------------------------------------------------
+
+def test_mutex_waits_know_the_mutex_and_its_owner(models):
+    for n, proto in (("mutex-inversion", "PTHREAD_PRIO_NONE"), ("mutex-inherit", "PTHREAD_PRIO_INHERIT")):
+        m = models[n]
+        control, sensor = _thread(m, "control"), _thread(m, "sensor")
+        waits = [w for w in m.mutex_waits if w.waiter == control.key]
+        assert len(waits) >= 25
+        assert len({w.sync for w in waits}) == 1
+        assert {model.mutex_protocol(w.flags) for w in waits} == {proto}
+        # the owner word in SyncMutexLock and the thread whose SyncMutexUnlock ended the wait agree
+        assert all(w.owner == w.released_by == sensor.key for w in waits)
+        assert all(w.start < w.end for w in waits)
+
+
+def test_owner_word_decoding():
+    threads = {(663571, 1): None, (663571, 2): None, (1, 2): None}
+    assert model.owner_thread(threads, 0x20130002) == (663571, 2)
+    assert model.owner_thread(threads, 0xA0130002) == (663571, 2)   # _NTO_SYNC_WAITING set
+    assert model.owner_thread(threads, 0x00010002, near_pid=1) == (1, 2)
+    assert model.owner_thread(threads, 0) is None
+    assert model.owner_thread(threads, 0xFFFFFFFB) is None          # condvar marker, not an owner
+    assert model.owner_thread(threads, 0x20130009) is None          # no such thread
+
+
+@pytest.mark.parametrize("owner_unlock_observed", [False, True])
+def test_mutex_unlocks_do_not_cross_process_address_spaces(owner_unlock_observed):
+    waiter_key, owner_key, unrelated_key = (101, 1), (101, 2), (202, 2)
+    mutex_address = 0x1000
+    events = [
+        kev.Event(0, 1, kev.PR_TH, kev.ST_RUNNING, [*unrelated_key, 30, 1]),
+        kev.Event(0, 0, kev.PR_TH, kev.ST_RUNNING, [*owner_key, 10, 1]),
+        kev.Event(1, 0, kev.PR_TH, kev.ST_RUNNING, [*waiter_key, 50, 1]),
+        kev.Event(2, 0, kev.KER_CALL, model.KER_MUTEX_LOCK,
+                  [mutex_address, 0, model.SYNC_NONRECURSIVE | model.SYNC_PRIONONE,
+                   owner_key[0] << 16 | owner_key[1]]),
+        kev.Event(3, 0, kev.PR_TH, model.ST_MUTEX, [*waiter_key, 50, 1]),
+        kev.Event(4, 0, kev.PR_TH, kev.ST_RUNNING, [*owner_key, 10, 1]),
+    ]
+    if owner_unlock_observed:
+        events.append(kev.Event(5, 0, kev.KER_CALL, model.KER_MUTEX_UNLOCK, [mutex_address, 0]))
+    events.extend([
+        kev.Event(6, 1, kev.KER_CALL, model.KER_MUTEX_UNLOCK, [mutex_address, 0]),
+        kev.Event(7, 0, kev.PR_TH, kev.ST_READY, [*waiter_key, 50, 1]),
+        kev.Event(8, 0, kev.PR_TH, kev.ST_RUNNING, [*waiter_key, 50, 1]),
+    ])
+    trace_model = model.build(kev.Kev({}, 1_000_000_000, 2, events))
+    wait = trace_model.mutex_waits[0]
+    assert wait.owner == owner_key
+    assert wait.released_by == (owner_key if owner_unlock_observed else None)
+    assert unrelated_key not in wait.holders
+
+
+@pytest.mark.parametrize("changed_at", [0, 4])
+def test_running_priority_change_preserves_the_new_priority(changed_at):
+    owner_key = (101, 2)
+    events = [
+        kev.Event(0, 0, kev.PR_TH, kev.ST_RUNNING, [*owner_key, 10, 1]),
+        kev.Event(changed_at, 0, kev.PR_TH, kev.ST_RUNNING, [*owner_key, 50, 1]),
+        kev.Event(10, 0, kev.PR_TH, kev.ST_RUNNING, [101, 1, 50, 1]),
+    ]
+    trace_model = model.build(kev.Kev({}, 1_000_000_000, 1, events))
+    expected_runs = [(0, changed_at, 0, 10)] if changed_at else []
+    expected_runs.append((changed_at, 10, 0, 50))
+    assert trace_model.threads[owner_key].runs == expected_runs
+
+
+def test_mutex_owner_priority_shows_inheritance(models):
+    def owner_prios(m):
+        sensor = _thread(m, "sensor")
+        out = set()
+        for w in m.mutex_waits:
+            if w.owner == sensor.key:
+                out |= {p for s, e, _, p in sensor.runs if e > w.start and s < w.end}
+        return out
+    assert owner_prios(models["mutex-inversion"]) == {10}
+    assert owner_prios(models["mutex-inherit"]) == {50}
+
+
+def test_report_finds_the_mutex_inversion_and_blames_logger(models):
+    s = report.summary(models["mutex-inversion"])
+    assert len(s["findings"]) == 1
+    f = s["findings"][0]
+    assert f["waiter"].startswith("control") and f["owners"][0].startswith("sensor")
+    assert f["waiter_prio"] == 50 and f["owner_prios"] == [10]
+    assert f["protocol"] == "PTHREAD_PRIO_NONE"
+    assert f["culprits"][0]["thread"].startswith("logger")
+    assert f["culprits"][0]["ms"] > 0.9 * f["stolen_ms_total"]
+    # rtdemo counted 12 of 300 cycles over budget in 3 s; the trace holds 1 s of it
+    assert 3 <= f["affected"] <= 15
+    assert f["worst"]["blocked_ms"] > 4.4      # with 0.6 ms of work, the 5 ms budget is gone
+    text = report.render(s)
+    assert "MUTEX PRIORITY INVERSION" in text and "_NTO_SYNC_PRIONONE" in text
+
+
+def test_report_is_clean_with_mutex_inheritance(models):
+    s = report.summary(models["mutex-inherit"])
+    assert s["findings"] == []
+    mx = next(x for x in s["mutexes"] if x["waiter"].startswith("control"))
+    assert mx["owners"][0].startswith("sensor") and mx["protocol"] == "PTHREAD_PRIO_INHERIT"
+    assert mx["max_ms"] < 2.0      # sensor runs at 50 and finishes its 2 ms critical section
 
 
 def test_messages_pair_up(models):
@@ -136,6 +253,20 @@ def test_perfetto_output_structure(models):
     assert names == sum(1 for th in m.threads.values() if not th.idle)
     assert slice_names.count("priority inversion") == len(inv) == 27
     assert slice_names.count("MsgSend -> sensor") >= 95
+
+
+def test_perfetto_output_marks_mutex_waits(models):
+    m = models["mutex-inversion"]
+    inv = perfetto.all_inversions(m)
+    assert len(inv) == 6 and all(isinstance(i, report.MutexInversion) for i in inv)
+    slice_names = []
+    for _, packet in _fields(perfetto.convert(m, inv)):
+        for pf, pv in _fields(packet):
+            if pf == perfetto.P_TRACK_EVENT:
+                slice_names += [v.decode() for ef, v in _fields(pv) if ef == 23]
+    assert slice_names.count("mutex priority inversion") == 6
+    control = _thread(m, "control")
+    assert slice_names.count("mutex wait -> sensor") == sum(1 for w in m.mutex_waits if w.waiter == control.key)
 
 
 def test_rejects_non_trace(tmp_path):

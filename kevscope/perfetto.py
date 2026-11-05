@@ -4,6 +4,7 @@ What you get in ui.perfetto.dev:
   - CPU lanes with every context switch (ftrace sched_switch / sched_waking records)
   - one track per QNX thread, with its scheduling state and slices for each MsgSend
     (client side) and each message being served (server side), linked by flow arrows
+  - a slice for each mutex wait on the waiting thread, with arrows to the owner and back
   - a "kevscope findings" track marking each priority inversion found by the report
 
 QNX ids don't fit Linux's model (pids are large, tids restart at 1 in every process), so each
@@ -12,7 +13,7 @@ Priorities are QNX priorities (higher = more urgent), unlike Linux's kernel prio
 """
 import struct
 
-from . import kev, report
+from . import kev, model as M, report
 
 # ---- minimal protobuf encoding -------------------------------------------------------------
 
@@ -216,20 +217,67 @@ def convert(model, findings=None):
         event(msg.replied, st, TYPE_SLICE_END, flows=[flow + 0x1000_0000])
         event(msg.replied, ct, TYPE_INSTANT, "reply", ends=[flow + 0x1000_0000])
 
+    for w in model.mutex_waits:
+        holders = w.holders
+        if w.end is None or not holders:
+            continue
+        waiter, holder = model.threads[w.waiter], model.threads[holders[-1]]
+        wt, ht = thread_track(w.waiter), thread_track(holder.key)
+        flow = 0x4000_0000 + w.flow
+        info = [("owner", holder.label), ("mutex", f"0x{w.sync:x}" if w.sync is not None else "?"),
+                ("protocol", M.mutex_protocol(w.flags))]
+        event(w.start, wt, TYPE_SLICE_BEGIN, f"mutex wait -> {holder.name or holder.tid}", flows=[flow], args=info)
+        event(w.end, wt, TYPE_SLICE_END)
+        event(w.start, ht, TYPE_INSTANT, f"{waiter.name or waiter.tid} waits for my mutex", ends=[flow],
+              args=[("waiter", waiter.label)])
+        event(w.end, ht, TYPE_INSTANT, "mutex unlock", flows=[flow + 0x1000_0000])
+        event(w.end, wt, TYPE_INSTANT, "got mutex", ends=[flow + 0x1000_0000])
+
     if findings:
-        uuid = 0x3000_0000
-        out.append(_packet(u(P_SEQ_ID, SEQ), m(P_TRACK_DESCRIPTOR, u(1, uuid), s(2, "kevscope findings"))))
-        for inv in findings:
-            msg = inv.message
+        lanes = []          # (uuid, end of the last slice on it)
+
+        def lane(a, b):
+            for i, (uuid, busy_until) in enumerate(lanes):
+                if busy_until <= a:
+                    lanes[i] = (uuid, b)
+                    return uuid
+            uuid = 0x3000_0000 + len(lanes)
+            name = "kevscope findings" if not lanes else f"kevscope findings ({len(lanes) + 1})"
+            out.append(_packet(u(P_SEQ_ID, SEQ), m(P_TRACK_DESCRIPTOR, u(1, uuid), s(2, name))))
+            lanes.append((uuid, b))
+            return uuid
+
+        def ran_instead(inv):
             culprits = sorted(inv.culprits.items(), key=lambda kv: -kv[1])
-            who = ", ".join(f"{model.threads[k].name or k[1]} {model.ms(v):.2f} ms" for k, v in culprits[:3])
-            event(msg.sent, uuid, TYPE_SLICE_BEGIN, "priority inversion",
-                  args=[("client", model.threads[msg.client].label), ("client_prio", inv.client_prio),
-                        ("server", model.threads[msg.server].label), ("server_prio", inv.server_prio),
-                        ("blocked_us", int(model.ms(inv.wait) * 1000)),
-                        ("stolen_us", int(model.ms(inv.stolen) * 1000)),
-                        ("ran_instead", who)])
-            event(msg.replied, uuid, TYPE_SLICE_END)
+            return ", ".join(f"{model.threads[k].name or k[1]} {model.ms(v):.2f} ms" for k, v in culprits[:3])
+
+        spans = []
+        for inv in findings:
+            if isinstance(inv, report.MutexInversion):
+                spans.append((inv.wait.start, inv.wait.end, inv))
+            else:
+                spans.append((inv.message.sent, inv.message.replied, inv))
+        for a, b, inv in sorted(spans, key=lambda x: x[:2]):
+            track = lane(a, b)
+            if isinstance(inv, report.MutexInversion):
+                w = inv.wait
+                event(a, track, TYPE_SLICE_BEGIN, "mutex priority inversion",
+                      args=[("waiter", model.threads[w.waiter].label), ("waiter_prio", inv.waiter_prio),
+                            ("owner", ", ".join(model.threads[k].label for k in w.holders)),
+                            ("owner_prio", inv.owner_prio),
+                            ("mutex", f"0x{w.sync:x}"), ("protocol", M.mutex_protocol(w.flags)),
+                            ("blocked_us", int(model.ms(inv.blocked) * 1000)),
+                            ("stolen_us", int(model.ms(inv.stolen) * 1000)),
+                            ("ran_instead", ran_instead(inv))])
+            else:
+                msg = inv.message
+                event(a, track, TYPE_SLICE_BEGIN, "priority inversion",
+                      args=[("client", model.threads[msg.client].label), ("client_prio", inv.client_prio),
+                            ("server", model.threads[msg.server].label), ("server_prio", inv.server_prio),
+                            ("blocked_us", int(model.ms(inv.wait) * 1000)),
+                            ("stolen_us", int(model.ms(inv.stolen) * 1000)),
+                            ("ran_instead", ran_instead(inv))])
+            event(b, track, TYPE_SLICE_END)
     return b"".join(out)
 
 
@@ -251,4 +299,7 @@ def _event_ts(encoded):
 
 
 def all_inversions(model):
-    return [inv for ch in report.analyze(model).values() for inv in ch.inversions]
+    """Message-passing and mutex priority inversions, for the findings track."""
+    msgs = [inv for ch in report.analyze(model).values() for inv in ch.inversions]
+    mutexes = [inv for lk in report.analyze_mutexes(model).values() for inv in lk.inversions]
+    return msgs + mutexes

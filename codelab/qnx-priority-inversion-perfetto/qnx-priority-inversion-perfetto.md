@@ -1,6 +1,6 @@
 id: qnx-priority-inversion-perfetto
 title: Find a Priority Inversion in a QNX Kernel Trace with Perfetto
-summary: Capture a QNX 8.0 kernel trace with tracelogger, open it in Perfetto with kevscope, and track down a message-passing priority inversion
+summary: Capture a QNX 8.0 kernel trace, open it in Perfetto with kevscope, and diagnose priority inversions through messages and mutexes
 categories: debugging, tools, real-time
 tags: intermediate
 difficulty: 3
@@ -24,9 +24,11 @@ The QNX kernel can tell you. Its instrumented kernel logs every context switch, 
 - open the trace in [Perfetto](https://ui.perfetto.dev), a free web-based trace viewer, using the open-source host tool **kevscope**
 - see the inversion on the timeline, and get the same answer as a command-line report
 - fix the bug and prove the fix with a second trace
+- repeat the diagnosis for a mutex whose priority inheritance was disabled
 
 ### What you'll learn
 - How QNX message passing propagates priority from client to server, and how to break it by accident
+- How a mutex owner's priority changes when a more urgent thread waits for its lock
 - How to capture a kernel trace with `tracelogger`
 - How to read thread states (RUNNING, READY, SEND/REPLY-blocked) on a timeline
 
@@ -96,7 +98,7 @@ Sensor has the lowest priority, yet the design works on QNX. When a client sends
 Now look at how the channel is created:
 
 ```c
-sensor_chid = ChannelCreate(bad_mode ? _NTO_CHF_FIXED_PRIORITY : 0);
+sensor_chid = ChannelCreate(bad ? _NTO_CHF_FIXED_PRIORITY : 0);
 ```
 
 `_NTO_CHF_FIXED_PRIORITY` tells the kernel not to change the server's priority. In `bad` mode, sensor serves control's request at priority 10, so logger can preempt it, and control stays blocked even though control is the most important thread in the system. That is a **priority inversion**.
@@ -122,7 +124,7 @@ tracelogger -s 1 -w -b 2048 -k 64 -f /dev/shmem/bad.kev
 | `-b 2048 -k 64` | more kernel buffers, so no events are dropped on a busy system |
 | `-f` | output file. `/dev/shmem` is RAM, so writing it doesn't disturb the timing |
 
-You need `tracelogger` to run while `rtdemo` is busy. `demo/capture.sh` does this for both modes. It starts `rtdemo bad 3`, waits a second, traces for one second, then repeats for `good`. Afterwards it sends the files to the host with a tiny TCP client (`kevpush.c`), because the default image has no working ssh server.
+You need `tracelogger` to run while `rtdemo` is busy. `demo/capture.sh` starts `rtdemo bad 3`, waits a second, traces for one second, then repeats for `good`, `mutex-bad` and `mutex-good`. It sends each trace and the corresponding demo output to the host with a tiny TCP client (`kevpush.c`), because the default image has no working ssh server. The last two modes are used in the mutex exercise later in this codelab.
 
 `demo/run-capture.sh` does the whole loop from the host:
 
@@ -137,14 +139,16 @@ Run it:
 
 ```bash
 cd ..   # repository root
-demo/run-capture.sh traces
+demo/run-capture.sh
 ```
 
-In under a minute you should see:
+The traces are written to the repository's `traces/` directory. Example demo output:
 
 ```
 rtdemo bad: 300 cycles, 55 over the 5 ms budget, mean 3.59 ms, worst 9.24 ms
 rtdemo good: 300 cycles, 0 over the 5 ms budget, mean 2.62 ms, worst 2.96 ms
+rtdemo mutex-bad: 300 cycles, 12 over the 5 ms budget, mean 1.40 ms, worst 6.49 ms
+rtdemo mutex-good: 300 cycles, 0 over the 5 ms budget, mean 1.29 ms, worst 2.48 ms
 ```
 
 Your numbers will differ a little. In `bad` mode, about one cycle in six blows the 5 ms budget. The program knows *that* it was late, but not *why*. The trace will tell you.
@@ -161,7 +165,7 @@ kevscope convert traces/bad.kev
 ```
 
 ```
-wrote traces/bad.pftrace (124 KiB): 108 threads, 1269 context switches, 125 messages, 27 priority inversions
+wrote traces/bad.pftrace (127 KiB): 108 threads, 1269 context switches, 125 messages, 10 mutex waits, 27 priority inversions (27 message passing, 0 mutex)
 ```
 
 Open [ui.perfetto.dev](https://ui.perfetto.dev), click **Open trace file**, and choose `traces/bad.pftrace`. The file is processed in your browser and isn't uploaded.
@@ -216,6 +220,7 @@ How kevscope decides: for every `MsgSend` it finds the server thread that receiv
 
 Other useful sections of the report:
 - **Message passing**: p50, p99 and max blocking time for every client → server pair
+- **Mutex waits**: p50, p99 and max blocking time per waiter and lock, when wide mutex arguments are available
 - **Wake-up latency**: the time from READY to RUNNING for each thread
 - **CPU time** per thread
 
@@ -240,30 +245,84 @@ kevscope report traces/good.kev
 ```
 
 ```
-No priority inversion found in message passing.
+No priority inversion found in message passing or mutex waits.
+
 Message passing (client -> server, time blocked per MsgSend):
      99  p50   2.043  p99   2.249  max   2.260 ms  control (rtdemo 598035/1) -> sensor (rtdemo 598035/2)
 ```
 
-The worst `MsgSend` dropped from 8.2 ms to 2.3 ms, and the jitter is gone. Open `good.pftrace` in Perfetto. Sensor now runs at priority 50 while it serves control, so logger waits until the reply has been sent.
+The worst `MsgSend` dropped from 8.2 ms to 2.3 ms in these samples. Convert the good trace with `kevscope convert traces/good.kev` and open `good.pftrace` in Perfetto. Sensor now runs at priority 50 while it serves control, so logger waits until the reply has been sent.
 
 Logger didn't get starved by the fix. It still gets the CPU between control's requests, just never in the middle of one.
+
+---
+
+## Diagnose a Mutex Inversion
+Duration: 6:00
+
+The same dependency can hide behind a shared data structure. In `mutex-bad`, sensor holds a mutex while updating a reading. Control locks that same mutex to read it. The three priorities are unchanged, but the mutex is created with:
+
+```c
+pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_NONE);
+```
+
+On QNX 8.0, this disables the default priority inheritance. Sensor stays at 10 while control (50) is MUTEX-blocked, so logger (30) can run first.
+
+The capture script has already produced both mutex traces:
+
+```bash
+kevscope report traces/mutex-bad.kev
+kevscope convert traces/mutex-bad.kev
+```
+
+The bundled failure sample reports:
+
+```text
+MUTEX PRIORITY INVERSION  control (rtdemo 663571/1) (prio 50) waited for a mutex held by sensor (rtdemo 663571/2)
+  6 of 29 waits affected. The owner ran at priority 10, below its priority 50 waiter,
+  so lower-priority work ran first: 7.5 ms in total, while the waiter was blocked 11.2 ms.
+    logger (rtdemo 663571/3) (prio 30): 7.5 ms
+  Worst: at +281.141 ms the waiter was blocked 5.28 ms, 4.12 ms of it behind lower-priority threads.
+  Mutex 0x4c5ad45018, protocol PTHREAD_PRIO_NONE.
+```
+
+Open `mutex-bad.pftrace` in Perfetto, expand the findings and `rtdemo` tracks, and focus on a `mutex priority inversion` finding. Control's `mutex wait -> sensor` slice spans the wait. Sensor is Runnable while logger is Running, then sensor resumes and releases the lock:
+
+![Mutex priority inversion in Perfetto](perfetto-mutex-inversion.png)
+
+The model gets the lock address, protocol flags and owner word from the wide `SyncMutexLock` event. MUTEX state transitions bound the wait. Owner READY intervals and the threads running on its CPU provide the scheduling evidence. The protocol alone is not enough to flag an inversion.
+
+### Enable inheritance and compare
+
+Remove the `pthread_mutexattr_setprotocol(..., PTHREAD_PRIO_NONE)` call, leaving QNX's default `PTHREAD_PRIO_INHERIT`. This is `mutex-good`:
+
+```bash
+kevscope report traces/mutex-good.kev --fail-on-inversion
+kevscope convert traces/mutex-good.kev
+```
+
+The bundled fixed trace has 38 control waits, no detected inversion, and a worst mutex wait of 1.439 ms instead of 5.277 ms. Sensor runs at priority 50 while control waits. The three-second demo reports zero cycles over budget instead of 12; the one-second trace covers only part of that run.
+
+`--fail-on-inversion` returns 3 for the failure trace and 0 for the fixed trace, just as it does for message passing. JSON uses `mutex_priority_inversion` for these findings and includes the mutex address and protocol. The original message-passing finding kind remains `priority_inversion`.
+
+This exercise uses same-process mutexes and one CPU. Cross-process shared-memory lock identity, general condition-variable dependencies, and full SMP scheduler/affinity analysis remain outside the validated cases. Missing owner events or truncated waits can prevent a finding.
 
 ---
 
 ## Congratulations
 Duration: 1:00
 
-You captured a kernel trace on QNX 8.0, viewed it in Perfetto, found a priority inversion and confirmed the fix.
+You captured kernel traces on QNX 8.0, viewed them in Perfetto, and confirmed fixes for priority inversions through both message passing and a mutex.
 
 ### What you've learned
 - QNX servers inherit their client's priority while serving a message, unless the channel uses `_NTO_CHF_FIXED_PRIORITY`
+- QNX mutexes default to `PTHREAD_PRIO_INHERIT`; disabling it can leave a high-priority waiter blocked behind lower-priority work
 - How to capture a trace with `tracelogger -w`
-- How to read thread states and message-passing slices in Perfetto
+- How to read thread states, message-passing slices and mutex waits in Perfetto
 - How to use `kevscope report` to check a whole trace, by hand or in CI
 
 ### Try next
-- Trace your own application. `kevscope report` works on any `.kev` file captured in wide mode
+- Trace your own application in wide mode and check the supported trace formats and analysis limits in the kevscope README
 - Use Perfetto's **Query (SQL)** page. For example, `select * from sched where dur > 1e6` lists every slice of more than 1 ms on a CPU
 - Read about [message passing and priority inheritance](https://www.qnx.com/developers/docs/8.0/com.qnx.doc.neutrino.sys_arch/topic/ipc_Priority_inheritance_messages.html) in the QNX System Architecture guide
 

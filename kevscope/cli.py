@@ -1,7 +1,7 @@
 """kevscope command line.
 
   kevscope convert trace.kev [-o trace.pftrace]   Perfetto trace for ui.perfetto.dev
-  kevscope report  trace.kev [--json]             priority inversions, IPC and wake-up latency
+  kevscope report  trace.kev [--json]             priority inversions (messages, mutexes), IPC, latency
   kevscope dump    trace.kev [-n N]               decoded events, traceprinter style
 """
 import argparse
@@ -24,8 +24,10 @@ def cmd_convert(a):
     out = a.output or str(Path(a.trace).with_suffix(".pftrace"))
     inv = perfetto.all_inversions(mdl)
     size = perfetto.write(mdl, out, inv)
+    n_mutex = sum(isinstance(i, report.MutexInversion) for i in inv)
     print(f"wrote {out} ({size / 1024:.0f} KiB): {len(mdl.threads)} threads, {len(mdl.switches)} context switches, "
-          f"{len(mdl.messages)} messages, {len(inv)} priority inversions")
+          f"{len(mdl.messages)} messages, {len(mdl.mutex_waits)} mutex waits, "
+          f"{len(inv)} priority inversions ({len(inv) - n_mutex} message passing, {n_mutex} mutex)")
     print("open it at https://ui.perfetto.dev (Open trace file)")
 
 
@@ -56,7 +58,7 @@ def main(argv=None):
     c.add_argument("trace")
     c.add_argument("-o", "--output")
     c.set_defaults(fn=cmd_convert)
-    r = sub.add_parser("report", help="find priority inversions and latency problems")
+    r = sub.add_parser("report", help="find priority inversions (message passing, mutexes) and latency problems")
     r.add_argument("trace")
     r.add_argument("--json", action="store_true")
     r.add_argument("--top", type=int, default=8)

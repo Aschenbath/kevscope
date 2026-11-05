@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build the demo, bake it into the QEMU image, boot, capture traces, and collect them on the host.
+# Build the demo, bake it into the QEMU image, boot, capture traces of all four modes, and collect
+# them on the host.
 # Usage: demo/run-capture.sh [output dir]
 set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,18 +23,18 @@ EOF
 
 cd "$VM"
 mkqnximage --noprompt --build 2>&1 | grep -iE "error|fatal"
-python3 "$REPO/demo/recv.py" "$OUT" 4 &
+python3 "$REPO/demo/recv.py" "$OUT" 8 &
 RECV=$!
 qemu-system-x86_64 -enable-kvm -cpu host -smp 2 -m 1G -nographic -serial mon:stdio \
   -pidfile output/qemu.pid -kernel output/ifs.bin -drive file=output/disk-qemu.vmdk,if=ide,id=drv0 \
   -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
   -object rng-random,filename=/dev/urandom,id=rng0 -device virtio-rng-pci,rng=rng0 \
   > console.log 2>&1 < /dev/null &
-for _ in $(seq 1 90); do
+for _ in $(seq 1 180); do
   grep -q "CAPTURE DONE" console.log 2>/dev/null && break
   sleep 1
 done
 kill "$(cat output/qemu.pid)" 2>/dev/null
 wait "$RECV" 2>/dev/null
-grep -E "rtdemo (good|bad)|--- capture|kevpush|CAPTURE DONE|tracelogger" console.log | tail -14
+grep -E "rtdemo (mutex-)?(good|bad)|--- capture|kevpush|CAPTURE DONE|tracelogger" console.log | tail -24
 ls -la "$OUT"

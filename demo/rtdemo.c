@@ -1,16 +1,24 @@
 /*
- * rtdemo: a small real-time system with a hidden message-passing bug.
+ * rtdemo: a small real-time system with two hidden priority-inversion bugs.
  *
- *   control  prio 50  every 10 ms: asks sensor for a reading (MsgSend), then computes
- *   sensor   prio 10  server: each request takes about 2 ms of CPU
+ *   control  prio 50  every 10 ms: gets a reading from sensor, then computes; must finish in 5 ms
+ *   sensor   prio 10  produces readings, about 2 ms of CPU each
  *   logger   prio 30  background work: a 6 ms burst every 25 ms
  *
- * QNX normally makes a server inherit the priority of the client it is serving, so sensor runs at
- * 50 while it handles control's request. "bad" mode creates the channel with
- * _NTO_CHF_FIXED_PRIORITY, which turns that off: sensor stays at 10, logger preempts it, and
- * control sits SEND/REPLY-blocked behind a lower-priority thread. That is a priority inversion.
+ * Message passing (good / bad): sensor is a server and control asks it with MsgSend. QNX normally
+ * makes a server inherit the priority of the client it is serving, so sensor runs at 50 while it
+ * handles control's request. "bad" creates the channel with _NTO_CHF_FIXED_PRIORITY, which turns
+ * that off: sensor stays at 10, logger preempts it, and control sits SEND/REPLY-blocked behind a
+ * lower-priority thread.
  *
- * Usage: rtdemo good|bad [seconds]
+ * Shared mutex (mutex-good / mutex-bad): sensor updates a shared reading with a mutex held for
+ * about 2 ms, and control locks the same mutex to read it. QNX mutexes use priority inheritance
+ * by default (PTHREAD_PRIO_INHERIT), so a priority 50 waiter lifts the owner to 50. "mutex-bad"
+ * creates the mutex with PTHREAD_PRIO_NONE, which is the default on Linux: sensor keeps priority
+ * 10 while it holds the lock, logger preempts it, and control waits MUTEX-blocked behind logger.
+ * This is the bug that kept resetting Mars Pathfinder in 1997.
+ *
+ * Usage: rtdemo good|bad|mutex-good|mutex-bad [seconds]
  * All threads are pinned to CPU 0 so the contention doesn't depend on the number of CPUs.
  */
 #include <errno.h>
@@ -30,13 +38,15 @@
 #define SENSOR_PRIO 10
 #define PERIOD_NS 10000000ULL
 #define SENSOR_WORK_NS 2000000ULL
+#define SENSOR_GAP_NS 2000000ULL
 #define LOGGER_WORK_NS 6000000ULL
 #define LOGGER_GAP_NS 25000000ULL
 #define PULSE_TICK (_PULSE_CODE_MINAVAIL + 1)
 
 static volatile int stop;
 static int sensor_chid;
-static int bad_mode;
+static pthread_mutex_t state_lock;
+static int shared_reading;
 
 static uint64_t now_ns(void) {
     struct timespec ts;
@@ -70,7 +80,8 @@ static void set_prio(int prio) {
     if (rc != 0) fprintf(stderr, "setschedparam: %s\n", strerror(rc));
 }
 
-static void *sensor_thread(void *arg) {
+/* Message-passing modes: sensor is a server. */
+static void *sensor_server(void *arg) {
     (void)arg;
     pthread_setname_np(pthread_self(), "sensor");
     pin_to_cpu0();
@@ -83,6 +94,23 @@ static void *sensor_thread(void *arg) {
         burn(SENSOR_WORK_NS);
         int reading = request + 1;
         MsgReply(rcvid, 0, &reading, sizeof(reading));
+    }
+    return NULL;
+}
+
+/* Mutex modes: sensor refreshes the shared reading with the lock held. */
+static void *sensor_writer(void *arg) {
+    (void)arg;
+    pthread_setname_np(pthread_self(), "sensor");
+    pin_to_cpu0();
+    set_prio(SENSOR_PRIO);
+    while (!stop) {
+        pthread_mutex_lock(&state_lock);
+        burn(SENSOR_WORK_NS);
+        shared_reading++;
+        pthread_mutex_unlock(&state_lock);
+        struct timespec gap = {0, (long)SENSOR_GAP_NS};
+        nanosleep(&gap, NULL);
     }
     return NULL;
 }
@@ -101,27 +129,43 @@ static void *logger_thread(void *arg) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2 || (strcmp(argv[1], "good") && strcmp(argv[1], "bad"))) {
-        fprintf(stderr, "usage: %s good|bad [seconds]\n", argv[0]);
+    const char *mode = argc > 1 ? argv[1] : "";
+    int bad = !strcmp(mode, "bad") || !strcmp(mode, "mutex-bad");
+    int mutex_mode = !strncmp(mode, "mutex-", 6);
+    if (!bad && strcmp(mode, "good") && strcmp(mode, "mutex-good")) {
+        fprintf(stderr, "usage: %s good|bad|mutex-good|mutex-bad [seconds]\n", argv[0]);
         return 2;
     }
-    bad_mode = !strcmp(argv[1], "bad");
     int seconds = argc > 2 ? atoi(argv[2]) : 3;
 
     pthread_setname_np(pthread_self(), "control");
     pin_to_cpu0();
     set_prio(CONTROL_PRIO);
 
-    sensor_chid = ChannelCreate(bad_mode ? _NTO_CHF_FIXED_PRIORITY : 0);
-    if (sensor_chid == -1) {
-        perror("ChannelCreate");
-        return 1;
-    }
+    int coid = -1;
     pthread_t sensor, logger;
-    pthread_create(&sensor, NULL, sensor_thread, NULL);
+    if (mutex_mode) {
+        pthread_mutexattr_t attr;
+        pthread_mutexattr_init(&attr);
+        if (bad) {
+            /* Linux's default protocol. On QNX it switches off priority inheritance for this mutex. */
+            int rc = pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_NONE);
+            if (rc != 0) fprintf(stderr, "setprotocol: %s\n", strerror(rc));
+        }
+        pthread_mutex_init(&state_lock, &attr);
+        pthread_mutexattr_destroy(&attr);
+        pthread_create(&sensor, NULL, sensor_writer, NULL);
+    } else {
+        sensor_chid = ChannelCreate(bad ? _NTO_CHF_FIXED_PRIORITY : 0);
+        if (sensor_chid == -1) {
+            perror("ChannelCreate");
+            return 1;
+        }
+        pthread_create(&sensor, NULL, sensor_server, NULL);
+        coid = ConnectAttach(0, 0, sensor_chid, _NTO_SIDE_CHANNEL, 0);
+    }
     pthread_create(&logger, NULL, logger_thread, NULL);
 
-    int coid = ConnectAttach(0, 0, sensor_chid, _NTO_SIDE_CHANNEL, 0);
     int tick_chid = ChannelCreate(0);
     int tick_coid = ConnectAttach(0, 0, tick_chid, _NTO_SIDE_CHANNEL, 0);
     struct sigevent event;
@@ -139,7 +183,14 @@ int main(int argc, char **argv) {
         MsgReceivePulse(tick_chid, &pulse, sizeof(pulse), NULL);
         uint64_t t0 = now_ns();
         int request = (int)cycles, reading = 0;
-        MsgSend(coid, &request, sizeof(request), &reading, sizeof(reading));
+        if (mutex_mode) {
+            pthread_mutex_lock(&state_lock);
+            reading = shared_reading;
+            burn(100000ULL);
+            pthread_mutex_unlock(&state_lock);
+        } else {
+            MsgSend(coid, &request, sizeof(request), &reading, sizeof(reading));
+        }
         burn(500000ULL);
         uint64_t took = now_ns() - t0;
         cycles++;
@@ -148,7 +199,7 @@ int main(int argc, char **argv) {
         if (took > PERIOD_NS / 2) misses++; /* the cycle must finish within 5 ms */
     }
     stop = 1;
-    printf("rtdemo %s: %lu cycles, %lu over the 5 ms budget, mean %.2f ms, worst %.2f ms\n", argv[1], cycles, misses,
+    printf("rtdemo %s: %lu cycles, %lu over the 5 ms budget, mean %.2f ms, worst %.2f ms\n", mode, cycles, misses,
            total / 1e6 / (cycles ? cycles : 1), worst / 1e6);
     return 0;
 }

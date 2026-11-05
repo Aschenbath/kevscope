@@ -2,13 +2,13 @@
 
 **See why a QNX real-time thread missed its deadline. Open a QNX kernel trace in Perfetto, and let kevscope point at the priority inversion.**
 
-Demo video (2 min): https://youtu.be/bcoGZ2ccpls
+Demo video (2 min, message-passing example): https://youtu.be/bcoGZ2ccpls
 
-QNX's `tracelogger` records every context switch, message and kernel call into a `.kev` file. Until now the only way to read one was the Momentics System Profiler. kevscope is a small host tool (Python 3.9+, standard library only) that:
+QNX's `tracelogger` records every context switch, message and kernel call into a `.kev` file, normally inspected with the Momentics System Profiler. kevscope is a small host tool (Python 3.9+, standard library only) that:
 
-- **decodes `.kev` files** without the QNX SDP. The decoder is checked event by event against QNX's own `traceprinter`: 32,302 of 32,302 events match on the two bundled traces, and thread, process and message fields are compared value by value.
-- **converts them to Perfetto** (`kevscope convert`), so you get CPU lanes, per-thread scheduling states, `MsgSend` → server → reply arrows and a findings track in [ui.perfetto.dev](https://ui.perfetto.dev). It's the same free UI Android and Linux developers already use, and you can query the trace with SQL.
-- **finds real-time problems** (`kevscope report`): message-passing priority inversions, with the threads that ran instead and for how long, plus MsgSend blocking times, wake-up latency and CPU time per thread. `--json` and `--fail-on-inversion` make it usable in CI.
+- **decodes `.kev` files** without the QNX SDP. The decoder is checked event by event against QNX's own `traceprinter`: 56,758 of 56,758 events match on the four bundled traces, and thread, process and message fields are compared value by value.
+- **converts them to Perfetto** (`kevscope convert`), so you get CPU lanes, per-thread scheduling states, `MsgSend` → server → reply arrows, mutex waiter → owner arrows and a findings track in [ui.perfetto.dev](https://ui.perfetto.dev). It's the same free UI Android and Linux developers already use, and you can query the trace with SQL.
+- **finds real-time problems** (`kevscope report`): priority inversions through message passing and mutexes, with the threads that ran instead and for how long, plus message and mutex blocking times, wake-up latency and CPU time per thread. Mutex findings include the lock address and priority protocol. `--json` and `--fail-on-inversion` make it usable in CI.
 
 QNX publishes a [Perfetto example for the hypervisor](https://gitlab.com/qnx/hypervisor/tools-for-qnx-hypervisor/perfetto). Its README says it shows a single track and isn't meant for detailed diagnosis. kevscope covers the QNX kernel trace itself and adds the analysis.
 
@@ -48,6 +48,38 @@ The same moment in Perfetto (`kevscope convert`): control is blocked in `MsgSend
 
 ![Priority inversion in Perfetto](docs/perfetto-inversion.png)
 
+## Example: the same inversion through a mutex
+
+`rtdemo mutex-bad` uses the same three threads, but sensor updates a shared reading while holding a mutex and control locks it to read the value. The mutex is created with `PTHREAD_PRIO_NONE`, so sensor stays at priority 10 even while control (50) waits. Logger (30) can preempt the owner. `rtdemo mutex-good` leaves QNX's default `PTHREAD_PRIO_INHERIT` enabled.
+
+Measured on QNX 8.0 in QEMU:
+
+```text
+rtdemo mutex-bad:  300 cycles, 12 over the 5 ms budget, mean 1.40 ms, worst 6.49 ms
+rtdemo mutex-good: 300 cycles,  0 over the 5 ms budget, mean 1.29 ms, worst 2.48 ms
+```
+
+Each bundled trace captures one second of the three-second demo. The report distinguishes the two protocols and identifies the thread delaying the owner:
+
+```text
+$ kevscope report tests/data/mutex-inversion.kev
+MUTEX PRIORITY INVERSION  control (rtdemo 663571/1) (prio 50) waited for a mutex held by sensor (rtdemo 663571/2)
+  6 of 29 waits affected. The owner ran at priority 10, below its priority 50 waiter,
+  so lower-priority work ran first: 7.5 ms in total, while the waiter was blocked 11.2 ms.
+    logger (rtdemo 663571/3) (prio 30): 7.5 ms
+  Worst: at +281.141 ms the waiter was blocked 5.28 ms, 4.12 ms of it behind lower-priority threads.
+  Mutex 0x4c5ad45018, protocol PTHREAD_PRIO_NONE.
+```
+
+| Mutex trace | Owner priority while control waits | Affected waits | Worst mutex wait |
+|-------------|-----------------------------------|----------------|------------------|
+| `mutex-inversion.kev` | 10 | 6 of 29 | 5.277 ms |
+| `mutex-inherit.kev` | 50 | 0 of 38 | 1.439 ms |
+
+In Perfetto, `mutex wait -> sensor` spans control's blocked interval. The owner is Runnable while logger runs, then finishes the critical section. The `kevscope findings` track marks that same interval:
+
+![Mutex priority inversion in Perfetto](docs/perfetto-mutex-inversion.png)
+
 ## Use it
 
 ```sh
@@ -70,20 +102,23 @@ Requires QNX SDP 8.0 (the free QNX Everywhere license works) and QEMU with KVM o
 
 ```sh
 source ~/qnx800/qnxsdp-env.sh
-mkdir -p ~/qnxvm && cd ~/qnxvm && mkqnximage --type=qemu --arch=x86_64 --noprompt --build
-demo/run-capture.sh traces/     # builds rtdemo with qcc, bakes it into the image, boots,
-                                # traces both modes and copies the .kev files back
+mkdir -p ~/qnxvm
+(cd ~/qnxvm && mkqnximage --type=qemu --arch=x86_64 --noprompt --build)
+demo/run-capture.sh
 kevscope report traces/bad.kev
+kevscope report traces/mutex-bad.kev
 ```
 
-`run-capture.sh` uses QEMU user networking. A small helper (`demo/kevpush.c`) sends the traces back to the host over TCP, because the stock image has no working sshd.
+Run these commands from the repository root. `run-capture.sh` builds the demo with `qcc`, bakes it into the image, boots QEMU, and captures all four modes: `bad`, `good`, `mutex-bad`, `mutex-good`. It uses QEMU user networking. A small helper (`demo/kevpush.c`) sends the traces back to the host over TCP, because the stock image has no working sshd. The default output directory is the repository's `traces/`. The script replaces the image's `data_files.custom` and `post_start.custom` snippets; use a dedicated demo image or preserve your own snippets first.
 
 ## How it works
 
 - `kevscope/kev.py`: reads the text header and skips the syspage, then reads 16-byte records. It rebuilds 64-bit timestamps from per-CPU `CONTROL/TIME` events and reassembles multi-record ("combine") events. Event layout comes from `<sys/trace.h>`.
-- `kevscope/model.py`: thread table, per-CPU run intervals, state history, and `MsgSend`/`MsgReceive`/`MsgReply` transactions matched by receive id.
-- `kevscope/report.py`: a message is a priority inversion when the server ran below the client's priority, and while the server was READY, threads with priority below the client's ran on the server's CPU. The report sums that time per culprit thread.
-- `kevscope/perfetto.py`: a hand-written protobuf encoder. It writes ftrace `sched_switch`/`sched_waking` records for the CPU view, `TrackEvent` slices with flows for message passing, and a process tree for names. QNX pids/tids are mapped to Linux-style tids, and the real ones stay in the thread names, e.g. `sensor [352275/2]`. Priorities are QNX priorities (higher is more urgent).
+- `kevscope/model.py`: thread table, per-CPU run intervals, state history, and `MsgSend`/`MsgReceive`/`MsgReply` transactions matched by receive id. Mutex waits pair MUTEX state transitions with wide `SyncMutexLock` arguments: the lock address, protocol flags and encoded owner. Unlock matching includes the process id so unrelated locks at the same virtual address cannot be confused. Running intervals preserve priority changes even without a context switch.
+- `kevscope/report.py`: a message is a priority inversion when the server ran below the client's priority, and while the server was READY, threads with priority below the client's ran on the server's CPU. Mutex analysis applies the same scheduling evidence to a blocked waiter and its lower-priority owner, using CPUs observed running the owner during the wait. The report sums that time per culprit thread and suggests checking the mutex protocol.
+- `kevscope/perfetto.py`: a hand-written protobuf encoder. It writes ftrace `sched_switch`/`sched_waking` records for the CPU view, `TrackEvent` slices with flows for messages and mutex waits, and a process tree for names. Overlapping findings use separate tracks. QNX pids/tids are mapped to Linux-style tids, and the real ones stay in the thread names, e.g. `sensor [352275/2]`. Priorities are QNX priorities (higher is more urgent).
+
+The original analysis covered message passing; mutex waits were only visible as scheduling states. Mutex analysis adds ownership and protocol evidence without adding a runtime dependency. JSON retains `kind: "priority_inversion"` for messages, adds `kind: "mutex_priority_inversion"` for mutex findings, and includes a `mutexes` latency table. `--fail-on-inversion` exits with code 3 for either kind and 0 for a clean report. Conversion output now counts mutex waits and distinguishes both finding kinds.
 
 ## Tests
 
@@ -91,12 +126,15 @@ kevscope report traces/bad.kev
 pip install pytest && pytest
 ```
 
-The tests use two real traces captured from `rtdemo` on QNX 8.0 (`tests/data`), and gzipped `traceprinter` output of the same files as the reference.
+The 24 pytest cases use four real traces captured from the controlled `rtdemo` workload on QNX 8.0 (`tests/data`), with gzipped `traceprinter` output as the reference, plus constructed event sequences for address-space collisions and same-timestamp priority changes. The message and mutex failure traces produce 27 and 6 individual inversions respectively; both inheritance-enabled traces are clean. Perfetto exports are also checked with the official `trace_processor` for parsing errors and expected finding counts.
+
+The two mutex fixtures redact capture and boot wall-clock dates from their headers and omit gzip timestamps. Their event payloads, relative timing and reference event output are unchanged.
 
 ## Limits
 
 - Supports little-endian traces in the 16-byte event encoding, which is QNX 8.0's default. It has been tested on x86_64 traces from QEMU.
-- Inversion detection covers message passing. Mutex and condvar waits show up in Perfetto but aren't analysed yet.
+- Mutex reconstruction requires wide kernel-call arguments, a resolved owner and a completed wait. Incomplete or unresolved waits cannot establish an inversion. Cross-process shared-memory lock identity and general condition-variable dependency chains are not reconstructed.
+- The bundled examples pin all demo threads to one CPU. Attribution on migrating threads or complex SMP workloads is approximate: the detector uses observed owner CPUs, not a full scheduler or affinity model. A clean report is not proof that every possible inversion is absent.
 - Some kernel-call arguments are decoded only as raw words (`dump` prints them; Perfetto doesn't show them).
 
 ## Built for

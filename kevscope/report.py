@@ -1,4 +1,4 @@
-"""Find real-time problems in a trace: priority inversion across message passing, wake-up latency."""
+"""Find real-time problems in a trace: priority inversion across message passing and mutexes, wake-up latency."""
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -84,6 +84,105 @@ def analyze(mdl):
     return channels
 
 
+@dataclass
+class MutexInversion:
+    """One mutex wait whose lower-priority owner was kept off the CPU by a thread below the waiter."""
+    wait: M.MutexWait
+    blocked: int                  # cycles the waiter was MUTEX-blocked
+    owner_prio: int               # highest priority the owner had during the wait
+    waiter_prio: int
+    culprits: dict                # thread key -> cycles it ran while the owner was ready
+    stolen: int
+
+
+@dataclass
+class Lock:
+    """All waits of one thread for one mutex."""
+    waiter: tuple
+    sync: int
+    holders: set = field(default_factory=set)
+    waits: list = field(default_factory=list)
+    inversions: list = field(default_factory=list)
+    owner_prios: set = field(default_factory=set)
+    waiter_prios: set = field(default_factory=set)
+    flags: int = None
+
+
+def _merge(spans):
+    out = []
+    for a, b in sorted(spans):
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return out
+
+
+def analyze_mutexes(mdl):
+    """Mutex waits grouped by (waiter, mutex), with the waits that were priority inversions."""
+    locks = {}
+    for w in mdl.mutex_waits:
+        if w.end is None or w.sync is None:
+            continue
+        waiter = mdl.threads[w.waiter]
+        lk = locks.get((w.waiter, w.sync))
+        if lk is None:
+            lk = locks[(w.waiter, w.sync)] = Lock(w.waiter, w.sync)
+        if w.flags is not None:
+            lk.flags = w.flags
+        lk.waits.append(w.end - w.start)
+        _, waiter_prio = waiter.state_at(w.start)
+        waiter_prio = waiter_prio or 0
+        lk.waiter_prios.add(waiter_prio)
+        holders = [mdl.threads[k] for k in w.holders]
+        if not holders:
+            continue
+        lk.holders.update(w.holders)
+
+        prios, cpus, ready = [], set(), []
+        for h in holders:
+            for a, b, cpu, prio in h.runs:
+                if b > w.start and a < w.end:
+                    prios.append(prio or 0)
+                    cpus.add(cpu)
+            for a, b, prio in state_spans(h, {kev.ST_READY}, w.start, w.end):
+                prios.append(prio or 0)
+                ready.append((a, b))
+        owner_prio = max(prios) if prios else 0
+        lk.owner_prios.add(owner_prio)
+
+        culprits = defaultdict(int)
+        skip = {w.waiter, *w.holders}
+        for a, b in _merge(ready):
+            for th in mdl.threads.values():
+                if th.idle or th.key in skip:
+                    continue
+                for rs, re_, cpu, p in th.runs:
+                    if re_ <= a:
+                        continue
+                    if rs >= b:
+                        break
+                    if (not cpus or cpu in cpus) and (p or 0) < waiter_prio:
+                        culprits[th.key] += min(re_, b) - max(rs, a)
+        stolen = sum(culprits.values())
+        if stolen > 0 and owner_prio < waiter_prio:
+            lk.inversions.append(MutexInversion(w, w.end - w.start, owner_prio, waiter_prio, dict(culprits), stolen))
+    return locks
+
+
+def mutex_cause(protocol, waiter_prio):
+    """Likely cause of a mutex inversion, as report lines."""
+    if protocol == "PTHREAD_PRIO_NONE":
+        return ["Likely cause: the mutex was created with PTHREAD_PRIO_NONE (the trace shows the",
+                "_NTO_SYNC_PRIONONE flag), so the owner keeps its own priority while others wait.",
+                "Drop that pthread_mutexattr_setprotocol() call: QNX's default is PTHREAD_PRIO_INHERIT."]
+    if protocol == "PTHREAD_PRIO_PROTECT":
+        return ["Likely cause: the mutex uses a priority ceiling (PTHREAD_PRIO_PROTECT) below the",
+                f"waiter's priority {waiter_prio}. Raise the ceiling or use PTHREAD_PRIO_INHERIT."]
+    return ["Likely cause: the owner was not raised to the waiter's priority. Check how the mutex",
+            "was created (pthread_mutexattr_setprotocol) and whether the owner sets its own priority."]
+
+
 def wake_latency(mdl):
     """Per thread: cycles from READY (after being blocked) to RUNNING."""
     out = defaultdict(list)
@@ -108,6 +207,7 @@ def summary(mdl):
     """Everything the text report and --json need, in plain data."""
     ms = mdl.ms
     chans = analyze(mdl)
+    locks = analyze_mutexes(mdl)
     lat = wake_latency(mdl)
     findings = []
     for ch in sorted(chans.values(), key=lambda c: -sum(i.stolen for i in c.inversions)):
@@ -134,6 +234,42 @@ def summary(mdl):
                       "blocked_ms": round(ms(worst.wait), 3),
                       "stolen_ms": round(ms(worst.stolen), 3)},
         })
+    for lk in sorted(locks.values(), key=lambda x: -sum(i.stolen for i in x.inversions)):
+        if not lk.inversions:
+            continue
+        waiter = mdl.threads[lk.waiter]
+        culprit_tot = defaultdict(int)
+        for inv in lk.inversions:
+            for k, v in inv.culprits.items():
+                culprit_tot[k] += v
+        worst = max(lk.inversions, key=lambda i: i.blocked)
+        findings.append({
+            "kind": "mutex_priority_inversion",
+            "waiter": waiter.label, "waiter_prio": max(lk.waiter_prios),
+            "owners": [mdl.threads[k].label for k in sorted(lk.holders)],
+            "owner_prios": sorted({i.owner_prio for i in lk.inversions}),
+            "mutex": f"0x{lk.sync:x}", "protocol": M.mutex_protocol(lk.flags),
+            "waits": len(lk.waits), "affected": len(lk.inversions),
+            "blocked_ms_total": round(ms(sum(i.blocked for i in lk.inversions)), 3),
+            "stolen_ms_total": round(ms(sum(i.stolen for i in lk.inversions)), 3),
+            "culprits": [{"thread": mdl.threads[k].label,
+                          "prio": max((p or 0) for *_, p in mdl.threads[k].runs) if mdl.threads[k].runs else 0,
+                          "ms": round(ms(v), 3)}
+                         for k, v in sorted(culprit_tot.items(), key=lambda kv: -kv[1])],
+            "worst": {"at_ms": round(ms(worst.wait.start - mdl.start), 3),
+                      "blocked_ms": round(ms(worst.blocked), 3),
+                      "stolen_ms": round(ms(worst.stolen), 3)},
+        })
+    mutexes = []
+    for lk in sorted(locks.values(), key=lambda x: -max(x.waits)):
+        w = [ms(x) for x in lk.waits]
+        mutexes.append({"waiter": mdl.threads[lk.waiter].label,
+                        "owners": [mdl.threads[k].label for k in sorted(lk.holders)],
+                        "mutex": f"0x{lk.sync:x}", "protocol": M.mutex_protocol(lk.flags),
+                        "waits": len(w), "p50_ms": round(percentile(w, 50), 3),
+                        "p99_ms": round(percentile(w, 99), 3), "max_ms": round(max(w), 3),
+                        "waiter_prio": max(lk.waiter_prios), "owner_prios": sorted(lk.owner_prios),
+                        "inversions": len(lk.inversions)})
     channels = []
     for ch in sorted(chans.values(), key=lambda c: -len(c.waits)):
         w = [ms(x) for x in ch.waits]
@@ -163,7 +299,7 @@ def summary(mdl):
                   "dropped_buffers": t.dropped, "partial_events": t.partial,
                   "system": f"{t.header.get('TRACE_SYSNAME', '')} {t.header.get('TRACE_SYS_RELEASE', '')}".strip(),
                   "machine": t.header.get("TRACE_MACHINE", "")},
-        "findings": findings, "channels": channels, "wake_latency": latency, "cpu": cpu,
+        "findings": findings, "channels": channels, "mutexes": mutexes, "wake_latency": latency, "cpu": cpu,
     }
 
 
@@ -177,8 +313,12 @@ def render(s, top=8):
                    "results may miss some activity")
     out.append("")
     if not s["findings"]:
-        out.append("No priority inversion found in message passing.")
+        out.append("No priority inversion found in message passing or mutex waits.")
+        out.append("")
     for f in s["findings"]:
+        if f["kind"] == "mutex_priority_inversion":
+            out += _render_mutex(f)
+            continue
         out.append(f"PRIORITY INVERSION  {f['client']} (prio {f['client_prio']}) waited on {f['server']}")
         out.append(f"  {f['affected']} of {f['messages']} messages affected. The server ran at priority "
                    f"{', '.join(map(str, f['server_prios']))}, below its priority {f['client_prio']} client,")
@@ -192,11 +332,21 @@ def render(s, top=8):
         out.append("  Likely cause: the server does not inherit its client's priority. Check for a channel")
         out.append("  created with _NTO_CHF_FIXED_PRIORITY, or a server that sets its own priority.")
         out.append("")
-    out.append("Message passing (client -> server, time blocked per MsgSend):")
+    if s["channels"]:
+        out.append("Message passing (client -> server, time blocked per MsgSend):")
     for c in s["channels"][:top]:
         flag = f"  <- {c['inversions']} inversions" if c["inversions"] else ""
         out.append(f"  {c['messages']:5d}  p50 {c['p50_ms']:7.3f}  p99 {c['p99_ms']:7.3f}  max {c['max_ms']:7.3f} ms"
                    f"  {c['client']} -> {c['server']}{flag}")
+    if s["mutexes"]:
+        if s["channels"]:
+            out.append("")
+        out.append("Mutex waits (waiter -> owner, time MUTEX-blocked per wait):")
+        for x in s["mutexes"][:top]:
+            flag = f"  <- {x['inversions']} inversions" if x["inversions"] else ""
+            owner = ", ".join(x["owners"]) or "owner unknown"
+            out.append(f"  {x['waits']:5d}  p50 {x['p50_ms']:7.3f}  p99 {x['p99_ms']:7.3f}  max {x['max_ms']:7.3f} ms"
+                       f"  {x['waiter']} -> {owner}{flag}")
     out.append("")
     out.append("Wake-up latency (ready -> running), worst first:")
     for r in s["wake_latency"][:top]:
@@ -207,3 +357,21 @@ def render(s, top=8):
     for r in s["cpu"][:top]:
         out.append(f"  {r['ms']:9.1f} ms  {100 * r['share']:5.1f}%  {r['thread']}")
     return "\n".join(out)
+
+
+def _render_mutex(f):
+    owners = " / ".join(f["owners"])
+    out = [f"MUTEX PRIORITY INVERSION  {f['waiter']} (prio {f['waiter_prio']}) waited for a mutex held by {owners}",
+           f"  {f['affected']} of {f['waits']} waits affected. The owner ran at priority "
+           f"{', '.join(map(str, f['owner_prios']))}, below its priority {f['waiter_prio']} waiter,",
+           f"  so lower-priority work ran first: {f['stolen_ms_total']:.1f} ms in total, "
+           f"while the waiter was blocked {f['blocked_ms_total']:.1f} ms."]
+    for c in f["culprits"][:3]:
+        out.append(f"    {c['thread']} (prio {c['prio']}): {c['ms']:.1f} ms")
+    w = f["worst"]
+    out.append(f"  Worst: at +{w['at_ms']:.3f} ms the waiter was blocked {w['blocked_ms']:.2f} ms, "
+               f"{w['stolen_ms']:.2f} ms of it behind lower-priority threads.")
+    out.append(f"  Mutex {f['mutex']}, protocol {f['protocol']}.")
+    out += ["  " + line for line in mutex_cause(f["protocol"], f["waiter_prio"])]
+    out.append("")
+    return out
