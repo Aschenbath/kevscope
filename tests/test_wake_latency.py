@@ -97,4 +97,3 @@ def test_native_mutex_inheritance_updates_do_not_inflate_sensor_wakeups():
     assert sum(key == sensor.key for _, key, _, _ in mdl.wakeups) == 153
     stats = next(row for row in report.summary(mdl)["wake_latency"] if row["thread"] == sensor.label)
     assert stats["wakeups"] == 153
-
