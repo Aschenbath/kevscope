@@ -2,7 +2,9 @@
 
 **See why a QNX real-time thread missed its deadline. Open a QNX kernel trace in Perfetto, and let kevscope point at the priority inversion.**
 
-Demo video (2 min, message-passing example): https://youtu.be/bcoGZ2ccpls
+Demo video (2 min, v0.3.1): https://youtu.be/I44O-XcHyqg
+
+The narrated demo follows cross-process IPC on two CPUs, inspects the same capture in Perfetto, compares mutex priority inheritance, and explains coverage warnings and wakeup counting. English subtitles are included.
 
 [Interactive examples](https://aschenbath.github.io/kevscope/) · [Step-by-step tutorial](codelab/qnx-priority-inversion-perfetto/qnx-priority-inversion-perfetto.md) · [Hackathon submission](https://devpost.com/software/kevscope)
 
