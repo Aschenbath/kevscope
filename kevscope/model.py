@@ -116,14 +116,28 @@ class MutexWait:
     flags: int = None         # _NTO_SYNC_* flags from the mutex's count word
     owner_raw: int = None     # owner word as the kernel saw it at SyncMutexLock
     owner: tuple = None       # thread that held the mutex when the wait began
-    released_by: tuple = None # thread whose SyncMutexUnlock ended the wait
+    released_by: tuple = None # thread with a matching SyncMutexUnlock observed during the wait
     via_condvar: bool = False # re-acquiring the mutex after a condvar wake-up
     flow: int = 0
     started_before_trace: bool = False
+    released_at: int = None   # timestamp of that observed unlock call, not the wait's end
 
     @property
     def holders(self):
         return [k for k in dict.fromkeys((self.owner, self.released_by)) if k and k != self.waiter]
+
+    @property
+    def reportable(self):
+        """A complete captured wait with a known lock address."""
+        return self.end is not None and self.sync is not None and not self.started_before_trace
+
+    @property
+    def attribution_owner(self):
+        """The single supported private-lock owner, shared by analysis and causal export."""
+        holders = self.holders
+        if self.reportable and not (self.flags or 0) & SYNC_SHARED and len(holders) == 1:
+            return holders[0]
+        return None
 
 
 @dataclass
@@ -210,6 +224,7 @@ def build(trace):
                     hit = last_unlock.get((w_open.waiter[0], w_open.sync)) if w_open.sync is not None and private else None
                     if hit and w_open.start <= hit[0] <= ev.t:
                         w_open.released_by = hit[1]
+                        w_open.released_at = hit[0]
                     del open_wait[th.key]
                 elif w_open is None and code == ST_MUTEX:
                     flow_seq += 1

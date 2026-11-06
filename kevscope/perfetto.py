@@ -219,20 +219,34 @@ def convert(model, findings=None):
         event(msg.replied, ct, TYPE_INSTANT, "error reply" if msg.error else "reply", ends=[flow + 0x1000_0000])
 
     for w in model.mutex_waits:
-        holders = w.holders
-        if w.end is None or not holders or (w.flags or 0) & M.SYNC_SHARED:
+        if not w.reportable:
             continue
-        waiter, holder = model.threads[w.waiter], model.threads[holders[-1]]
-        wt, ht = thread_track(w.waiter), thread_track(holder.key)
+        waiter = model.threads[w.waiter]
+        wt = thread_track(w.waiter)
+        owner = w.attribution_owner
+        info = [("mutex", f"0x{w.sync:x}"), ("protocol", M.mutex_protocol(w.flags))]
+        if owner is None:
+            reason = ("shared object identity unknown" if (w.flags or 0) & M.SYNC_SHARED
+                      else "owner changed; handoff time unknown" if len(w.holders) > 1
+                      else "owner unknown")
+            event(w.start, wt, TYPE_SLICE_BEGIN, "mutex wait (owner uncertain)",
+                  args=info + [("ownership", reason)])
+            event(w.end, wt, TYPE_SLICE_END)
+            continue
+        holder = model.threads[owner]
+        ht = thread_track(owner)
         flow = 0x4000_0000 + w.flow
-        info = [("owner", holder.label), ("mutex", f"0x{w.sync:x}" if w.sync is not None else "?"),
-                ("protocol", M.mutex_protocol(w.flags))]
+        info.append(("owner", holder.label))
         event(w.start, wt, TYPE_SLICE_BEGIN, f"mutex wait -> {holder.name or holder.tid}", flows=[flow], args=info)
         event(w.end, wt, TYPE_SLICE_END)
         event(w.start, ht, TYPE_INSTANT, f"{waiter.name or waiter.tid} waits for my mutex", ends=[flow],
               args=[("waiter", waiter.label)])
-        event(w.end, ht, TYPE_INSTANT, "mutex unlock", flows=[flow + 0x1000_0000])
-        event(w.end, wt, TYPE_INSTANT, "got mutex", ends=[flow + 0x1000_0000])
+        returned = []
+        if w.released_by == owner and w.released_at is not None and w.start <= w.released_at <= w.end:
+            returned = [flow + 0x1000_0000]
+            event(w.released_at, ht, TYPE_INSTANT, "mutex unlock call", flows=returned)
+        # Leaving MUTEX state does not establish successful acquisition (for example, cancellation).
+        event(w.end, wt, TYPE_INSTANT, "mutex wait ended", ends=returned)
 
     if findings:
         lanes = []          # (uuid, end of the last slice on it)

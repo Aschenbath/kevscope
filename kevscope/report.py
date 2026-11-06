@@ -128,7 +128,7 @@ def analyze_mutexes(mdl, schedule=None, waiters=None):
     for w in mdl.mutex_waits:
         if waiters is not None and w.waiter not in waiters:
             continue
-        if w.end is None or w.sync is None or w.started_before_trace:
+        if not w.reportable:
             continue
         waiter = mdl.threads[w.waiter]
         lk = locks.get((w.waiter, w.sync))
@@ -151,10 +151,11 @@ def analyze_mutexes(mdl, schedule=None, waiters=None):
         lk.owner_prios.update(prios)
         if (w.flags or 0) & M.SYNC_SHARED:
             continue  # A virtual address cannot establish shared-object identity across processes.
-        if len(holders) != 1:
+        owner = w.attribution_owner
+        if owner is None:
             schedule.uncertain["ownership_changed"].add((w.waiter, w.start, w.end))
             continue
-        evidence = schedule.interference(holders[0], waiter, w.start, w.end)
+        evidence = schedule.interference(mdl.threads[owner], waiter, w.start, w.end)
         culprits = culprit_times(evidence)
         stolen = sum(culprits.values())
         if stolen:

@@ -6,7 +6,7 @@ Demo video (2 min, v0.3.1): https://youtu.be/I44O-XcHyqg
 
 The narrated demo follows cross-process IPC on two CPUs, inspects the same capture in Perfetto, compares mutex priority inheritance, and explains coverage warnings and wakeup counting. English subtitles are included.
 
-Version 0.3.2 adds optional wait budgets for CI and an examples page that starts with the measured IPC improvement. The video demonstrates the shared 0.3.1 workflow.
+Version 0.3.3 makes Perfetto mutex arrows follow the captured ownership and unlock evidence. Optional wait budgets and the examples page's measured IPC improvement were added in 0.3.2. The video demonstrates the shared 0.3.1 workflow.
 
 [Interactive examples](https://aschenbath.github.io/kevscope/) · [Step-by-step tutorial](codelab/qnx-priority-inversion-perfetto/qnx-priority-inversion-perfetto.md) · [Hackathon submission](https://devpost.com/software/kevscope)
 
@@ -207,13 +207,21 @@ QNX can update a thread's priority while it remains READY. This is not another w
 
 A wake-latency sample starts at a captured entry into READY from another non-running state and ends at the next RUNNING transition, provided the thread stays READY in between. Its priority is the priority at that initial entry. Preemption, a capture starting mid-READY, and a READY interval cancelled or cut off before execution do not create a completed latency sample. Repeated READY updates neither reset the start nor require repeatedly scanning the remaining history.
 
+### Mutex evidence in Perfetto
+
+Before 0.3.3, conversion chose the last observed holder even when ownership changed, and emitted `mutex unlock` and `got mutex` at the end of every exported wait. Leaving the MUTEX state can also reflect cancellation or timeout; it does not prove acquisition, and a matching unlock call can precede that state transition.
+
+Analysis and conversion now share the complete-wait and single-private-owner rules. A complete wait with a known lock address remains visible as `mutex wait (owner uncertain)` when ownership is unresolved, changes during the wait, or refers to a process-shared object. These slices have no owner arrows. Waits missing their start, end or address do not become complete dependency slices; captured scheduling states remain available.
+
+For supported ownership, the waiter-to-owner arrow remains. A return arrow is emitted only for a matching observed `SyncMutexUnlock` call, at that call's actual timestamp; its label is `mutex unlock call`. The endpoint is `mutex wait ended`, which does not claim a successful lock acquisition. This adds one timestamp to the in-memory wait model without changing report JSON, wait budgets or inversion counts. Eleven regression cases cover missing unlocks, cancellation, ownership uncertainty, clipped waits and the native captures; official Perfetto queries check the exported event times and flows. The capture does not establish the unlock call's return status or arbitrary ownership handoffs.
+
 ## Tests
 
 ```sh
 pip install pytest && pytest
 ```
 
-The 149 pytest cases cover six controlled QNX captures (`tests/data`) with gzipped `traceprinter` references; IPC identity collisions, reply handoffs and phase boundaries; address-space collisions and instantaneous priority changes; CPU migration counterexamples; wakeup updates, preemption, capture boundaries, cancelled waits and linear scan work; evidence coverage, comparison matching, CLI exits and HTML escaping; and real localhost transfer failures. Wait-budget cases cover zero-inversion failures, unrounded boundaries, per-dependency p99, empty samples, invalid limits, strict precedence and all three output formats. Five Linux-only cases verify capture validation, build failure/timeout and snippet restoration (144 pass and 5 skip on Windows). The failure fixtures produce 29 same-process message, 6 mutex and 25 cross-process message inversions; the inheritance-enabled fixtures have none. Perfetto exports are independently checked with the official `trace_processor`.
+The 160 pytest cases cover six controlled QNX captures (`tests/data`) with gzipped `traceprinter` references; IPC identity collisions, reply handoffs and phase boundaries; address-space collisions and instantaneous priority changes; CPU migration counterexamples; wakeup updates, preemption, capture boundaries, cancelled waits and linear scan work; evidence coverage, comparison matching, CLI exits and HTML escaping; and real localhost transfer failures. Wait-budget cases cover zero-inversion failures, unrounded boundaries, per-dependency p99, empty samples, invalid limits, strict precedence and all three output formats. Mutex export cases verify observed unlock timestamps, missing unlocks, cancellation, uncertain ownership and incomplete evidence. Five Linux-only cases verify capture validation, build failure/timeout and snippet restoration (155 pass and 5 skip on Windows). The failure fixtures produce 29 same-process message, 6 mutex and 25 cross-process message inversions; the inheritance-enabled fixtures have none. Perfetto exports are independently checked with the official `trace_processor`.
 
 CI runs on Linux and Windows with Python 3.9 and 3.14. Rebuild the public examples directly from the fixtures with `python demo/generate_examples.py`; generated reports contain relative trace time and no generation timestamp. The generator owns the landing-page copy, video link and measured figures, writes consistent LF newlines on both platforms, and CI checks its output against the committed pages. Edit the generator rather than only the generated HTML so regeneration preserves public entry points.
 
