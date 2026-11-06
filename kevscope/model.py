@@ -21,6 +21,11 @@ BLOCKED_LABELS = {
 }
 
 
+def wakeup_transition(previous, state):
+    """A captured entry into READY, excluding preemption and READY updates."""
+    return state == kev.ST_READY and previous not in (None, kev.ST_RUNNING, kev.ST_READY)
+
+
 @dataclass
 class Thread:
     pid: int
@@ -239,9 +244,10 @@ def build(trace):
                             th.runs.append((prev[1], ev.t, ev.cpu, prev[2]))
                         running[ev.cpu] = (th.key, ev.t, prio)
                 elif code == kev.ST_READY:
-                    # woken (or preempted): the CPU that logged it is where the decision was made
+                    # Priority updates while already READY are not new wakeups.
+                    # The logging CPU identifies where the decision was made.
                     last = th.changes[-2][1] if len(th.changes) >= 2 else None
-                    if last != kev.ST_RUNNING:
+                    if wakeup_transition(last, code):
                         wakeups.append((ev.t, th.key, prio, ev.cpu))
         elif ev.cls == kev.KER_CALL and not ev.code & kev.KER_EXIT_BIT:
             call = ev.code & 0x7F

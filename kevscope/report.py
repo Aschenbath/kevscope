@@ -177,22 +177,22 @@ def mutex_cause(protocol, waiter_prio):
 
 
 def wake_latency(mdl):
-    """Per thread: cycles from READY (after being blocked) to RUNNING."""
+    """Per thread: completed wake-to-run intervals, in one pass over state changes."""
     out = defaultdict(list)
     for th in mdl.threads.values():
         if th.idle:
             continue
-        ch = th.changes
-        for i in range(1, len(ch)):
-            t, st, prio, _ = ch[i]
-            if st != kev.ST_READY or ch[i - 1][1] == kev.ST_RUNNING:
-                continue
-            for j in range(i + 1, len(ch)):
-                if ch[j][1] == kev.ST_RUNNING:
-                    out[th.key].append((ch[j][0] - t, t, prio))
-                    break
-                if ch[j][1] != kev.ST_READY:
-                    break
+        previous, woken = None, None
+        for t, st, prio, _ in th.changes:
+            if M.wakeup_transition(previous, st):
+                woken = (t, prio)
+            elif st != kev.ST_READY:
+                if st == kev.ST_RUNNING and woken is not None:
+                    start, wake_prio = woken
+                    out[th.key].append((t - start, start, wake_prio))
+                # A cancelled wakeup must not be paired with a later execution.
+                woken = None
+            previous = st
     return out
 
 

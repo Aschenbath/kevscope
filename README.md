@@ -181,13 +181,19 @@ Version 0.3.0 replaces the earlier global-ID join with these scoped identities. 
 
 Acceptance is the earlier of the client's REPLY state and the receive event. The receiver may log `REC_MESSAGE` only after it next gets CPU, so using that event alone would miss a real scheduling delay. Reports separate send-to-acceptance (`queue_ms`) from accepted-to-reply (`service_ms`), and attribute receiver interference only after acceptance with complete service evidence. Pre-acceptance time includes kernel send processing and any SEND queueing; it is not assigned to the eventual receiver. Handoffs retain measured call latency but are excluded from receiver-specific attribution and Perfetto causal flows.
 
+### Wake-up latency and READY updates
+
+QNX can update a thread's priority while it remains READY. This is not another wakeup. Earlier versions restarted latency measurement and emitted another Perfetto wake event at each such update; an update after preemption could also create a false wakeup. Version 0.3.1 shares the wake-transition rule between reports and Perfetto and scans each thread's state history once. In the bundled `mutex-inherit.kev`, sensor has **153** completed wakeups, replacing the earlier inflated count of **191**. Its 38 READY priority updates remain available to scheduling analysis. The fixture events, dependency latencies and inversion findings are unchanged.
+
+A wake-latency sample starts at a captured entry into READY from another non-running state and ends at the next RUNNING transition, provided the thread stays READY in between. Its priority is the priority at that initial entry. Preemption, a capture starting mid-READY, and a READY interval cancelled or cut off before execution do not create a completed latency sample. Repeated READY updates neither reset the start nor require repeatedly scanning the remaining history.
+
 ## Tests
 
 ```sh
 pip install pytest && pytest
 ```
 
-The 110 pytest cases cover six controlled QNX captures (`tests/data`) with gzipped `traceprinter` references; IPC identity collisions, reply handoffs and phase boundaries; address-space collisions and instantaneous priority changes; CPU migration counterexamples; evidence coverage, comparison matching, CLI exits and HTML escaping; and real localhost transfer failures. Five Linux-only cases verify capture validation, build failure/timeout and snippet restoration (105 pass and 5 skip on Windows). The failure fixtures produce 29 same-process message, 6 mutex and 25 cross-process message inversions; the inheritance-enabled fixtures have none. Perfetto exports are independently checked with the official `trace_processor`.
+The 120 pytest cases cover six controlled QNX captures (`tests/data`) with gzipped `traceprinter` references; IPC identity collisions, reply handoffs and phase boundaries; address-space collisions and instantaneous priority changes; CPU migration counterexamples; wakeup updates, preemption, capture boundaries, cancelled waits and linear scan work; evidence coverage, comparison matching, CLI exits and HTML escaping; and real localhost transfer failures. Five Linux-only cases verify capture validation, build failure/timeout and snippet restoration (115 pass and 5 skip on Windows). The failure fixtures produce 29 same-process message, 6 mutex and 25 cross-process message inversions; the inheritance-enabled fixtures have none. Perfetto exports are independently checked with the official `trace_processor`.
 
 CI runs on Linux and Windows with Python 3.9 and 3.14. Rebuild the public examples directly from the fixtures with `python demo/generate_examples.py`; generated reports contain relative trace time and no generation timestamp.
 
