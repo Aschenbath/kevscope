@@ -7,6 +7,7 @@
 """
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -34,7 +35,7 @@ def cmd_convert(a):
 
 
 def cmd_report(a):
-    s = report.summary(_load(a.trace), a.process)
+    s = report.summary(_load(a.trace), a.process, max_wait_ms=a.max_wait_ms, p99_wait_ms=a.p99_wait_ms)
     if a.html:
         _check_output(a.html, a.trace)
         Path(a.html).write_text(html_report.render(s, Path(a.trace).name), encoding="utf-8")
@@ -46,12 +47,14 @@ def cmd_report(a):
         print(report.render(s, top=a.top))
     if a.strict and s["analysis"]["status"] != "usable":
         sys.exit(4)
+    _budget_exit(s)
     if a.fail_on_inversion and s["findings"]:
         sys.exit(3)
 
 
 def cmd_compare(a):
-    result = comparison.compare(_load(a.baseline), _load(a.candidate), a.process)
+    result = comparison.compare(_load(a.baseline), _load(a.candidate), a.process,
+                                max_wait_ms=a.max_wait_ms, p99_wait_ms=a.p99_wait_ms)
     names = Path(a.baseline).name, Path(a.candidate).name
     if a.html:
         _check_output(a.html, a.baseline, a.candidate)
@@ -64,7 +67,16 @@ def cmd_compare(a):
         print(comparison.render(result, *names))
     if a.strict and result["status"] != "comparable":
         sys.exit(4)
+    _budget_exit(result["candidate"])
     if a.fail_on_regression and result["regressions"]:
+        sys.exit(3)
+
+
+def _budget_exit(summary):
+    status = summary.get("wait_budget", {}).get("status")
+    if status == "no_samples":
+        sys.exit(4)
+    if status == "exceeded":
         sys.exit(3)
 
 
@@ -81,12 +93,26 @@ def _positive_int(value):
     return number
 
 
+def _positive_ms(value):
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be finite positive milliseconds") from None
+    if not math.isfinite(number) or number <= 0:
+        raise argparse.ArgumentTypeError("must be finite positive milliseconds")
+    return number
+
+
 def _formats(parser):
     parser.add_argument("--process", metavar="NAME_OR_PID", help="analyze waits of this process; keep other threads as scheduling evidence")
     output = parser.add_mutually_exclusive_group()
     output.add_argument("--json", action="store_true")
     output.add_argument("--html", metavar="FILE", help="write a self-contained offline HTML report")
     parser.add_argument("--strict", action="store_true", help="exit 4 if evidence or comparison coverage is limited (takes precedence over exit 3)")
+    parser.add_argument("--max-wait-ms", type=_positive_ms, metavar="MS",
+                        help="exit 3 if any dependency's completed maximum wait exceeds MS (candidate in compare)")
+    parser.add_argument("--p99-wait-ms", type=_positive_ms, metavar="MS",
+                        help="exit 3 if any dependency's completed p99 wait exceeds MS (candidate in compare)")
 
 
 def cmd_dump(a):

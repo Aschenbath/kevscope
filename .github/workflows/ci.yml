@@ -21,9 +21,13 @@ jobs:
       - run: python -m pip install . pytest
       - run: python -m pytest -q
       - name: Exercise installed CLI and generate an offline comparison
-        run: kevscope compare tests/data/mutex-inversion.kev tests/data/mutex-inherit.kev --process rtdemo --strict --fail-on-regression --html comparison.html
+        run: kevscope compare tests/data/mutex-inversion.kev tests/data/mutex-inherit.kev --process rtdemo --strict --fail-on-regression --max-wait-ms 2 --p99-wait-ms 2 --html comparison.html
       - name: Exercise cross-process IPC comparison
         run: kevscope compare tests/data/ipc-inversion.kev tests/data/ipc-inherit.kev --process rtdemo --fail-on-regression --html ipc.html
+      - name: Rebuild published examples from their source
+        run: python demo/generate_examples.py
+      - name: Check that published examples are current
+        run: git diff --exit-code -- docs/index.html docs/examples
       - name: Check capture scripts and portable transfer helper
         if: runner.os == 'Linux'
         run: |

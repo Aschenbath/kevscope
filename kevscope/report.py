@@ -2,7 +2,7 @@
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from . import kev, model as M, quality
+from . import budget, kev, model as M, quality
 from .schedule import Schedule, culprit_times
 
 
@@ -196,7 +196,7 @@ def wake_latency(mdl):
     return out
 
 
-def summary(mdl, process=None):
+def summary(mdl, process=None, *, max_wait_ms=None, p99_wait_ms=None):
     """Everything the text report and --json need, in plain data."""
     ms = mdl.ms
     waiters = None
@@ -266,13 +266,22 @@ def summary(mdl, process=None):
                       "stolen_ms": round(ms(worst.stolen), 3), "evidence": evidence_rows(worst)},
         })
     mutexes = []
+    budget_measurements = []
+    check_budget = max_wait_ms is not None or p99_wait_ms is not None
     for lk in sorted(locks.values(), key=lambda x: -max(x.waits)):
         w = [ms(x) for x in lk.waits]
+        p50, p99, maximum = percentile(w, 50), percentile(w, 99), max(w)
+        if check_budget:
+            owners = ', '.join(mdl.threads[key].label for key in sorted(lk.holders)) or 'owner unknown'
+            budget_measurements.append({
+                "kind": "mutex", "dependency": f"{mdl.threads[lk.waiter].label} -> {owners} [0x{lk.sync:x}]",
+                "waits": len(w), "p99_ms": p99, "max_ms": maximum,
+            })
         mutexes.append({"waiter": mdl.threads[lk.waiter].label,
                         "owners": [mdl.threads[k].label for k in sorted(lk.holders)],
                         "mutex": f"0x{lk.sync:x}", "protocol": M.mutex_protocol(lk.flags),
-                        "waits": len(w), "p50_ms": round(percentile(w, 50), 3),
-                        "p99_ms": round(percentile(w, 99), 3), "max_ms": round(max(w), 3),
+                        "waits": len(w), "p50_ms": round(p50, 3),
+                        "p99_ms": round(p99, 3), "max_ms": round(maximum, 3),
                         "waiter_prio": max(lk.waiter_prios), "owner_prios": sorted(lk.owner_prios),
                         "inversions": len(lk.inversions)})
     channels = []
@@ -286,12 +295,18 @@ def summary(mdl, process=None):
 
     for ch in sorted(chans.values(), key=lambda c: -len(c.waits)):
         w = [ms(x) for x in ch.waits]
+        p50, p99, maximum = percentile(w, 50), percentile(w, 99), max(w)
+        if check_budget:
+            budget_measurements.append({
+                "kind": "message", "dependency": f"{mdl.threads[ch.client].label} -> {mdl.threads[ch.server].label}",
+                "waits": len(w), "p99_ms": p99, "max_ms": maximum,
+            })
         channels.append({"client": mdl.threads[ch.client].label, "server": mdl.threads[ch.server].label,
                          "cross_process": ch.client[0] != ch.server[0],
                          "client_cpus": sorted({r[2] for r in mdl.threads[ch.client].runs}),
                          "server_cpus": sorted({r[2] for r in mdl.threads[ch.server].runs}),
-                         "messages": len(w), "p50_ms": round(percentile(w, 50), 3),
-                         "p99_ms": round(percentile(w, 99), 3), "max_ms": round(max(w), 3),
+                         "messages": len(w), "p50_ms": round(p50, 3),
+                         "p99_ms": round(p99, 3), "max_ms": round(maximum, 3),
                          "client_prio": max(ch.client_prios), "server_prios": sorted(ch.server_prios),
                          "queue_ms": phase_stats(ch.queue_waits), "service_ms": phase_stats(ch.service_waits),
                          "inversions": len(ch.inversions)})
@@ -315,7 +330,7 @@ def summary(mdl, process=None):
             cpu.append({"thread": th.label, "ms": round(ms(busy), 3), "share": round(busy / (span or 1), 4)})
     cpu.sort(key=lambda r: -r["ms"])
     t = mdl.trace
-    return {
+    result = {
         "trace": {"duration_ms": round(ms(span), 3), "cpus": t.cpus, "events": len(t.events),
                   "dropped_buffers": t.dropped, "partial_events": t.partial,
                   "trailing_bytes": t.trailing_bytes,
@@ -324,6 +339,9 @@ def summary(mdl, process=None):
         "analysis": {**quality.assess(mdl, schedule, waiters), "process": process},
         "findings": findings, "channels": channels, "mutexes": mutexes, "wake_latency": latency, "cpu": cpu,
     }
+    if check_budget:
+        result["wait_budget"] = budget.evaluate(budget_measurements, max_wait_ms, p99_wait_ms)
+    return result
 
 
 def render(s, top=8):
@@ -339,6 +357,8 @@ def render(s, top=8):
         out.append(f"  coverage: {coverage['messages_completed']}/{coverage['messages_observed']} messages, "
                    f"{coverage['mutex_waits_completed']}/{coverage['mutex_waits_observed']} mutex waits completed")
     out.append("")
+    if "wait_budget" in s:
+        out.extend((budget.render(s["wait_budget"]), ""))
     if not s["findings"]:
         if analysis.get("status", "usable") == "usable":
             out.append("No priority inversion found in the analyzed message and mutex waits.")

@@ -46,10 +46,10 @@ def e(value):
     return escape(str(value), quote=True)
 
 
-def _document(title, body):
+def _document(title, body, extra_css=""):
     return f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='5' fill='%23086e59'/%3E%3Cpath d='M4 18h5l3-9 5 16 3-10h8' fill='none' stroke='white' stroke-width='2'/%3E%3C/svg%3E"><title>{e(title)} · kevscope</title><style>{CSS}</style></head>
+<meta name="color-scheme" content="light"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='5' fill='%23086e59'/%3E%3Cpath d='M4 18h5l3-9 5 16 3-10h8' fill='none' stroke='white' stroke-width='2'/%3E%3C/svg%3E"><title>{e(title)} · kevscope</title><style>{CSS}{extra_css}</style></head>
 <body><div class="wrap"><nav aria-label="Report identity"><div class="brand">kev<i>scope</i></div>
 <div class="nav-note">QNX KERNEL TRACE DIAGNOSTICS<br>Offline report · v{e(__version__)}</div></nav>
 <main>{body}</main><footer><span>kevscope · Local analysis. No uploads or external resources.</span>
@@ -76,6 +76,30 @@ def _metrics(before, after=None):
             value += f'<span class="arrow">→</span>{e(b)}'
         parts.append(f'<div class="metric"><span class="eyebrow">{label}</span><strong>{value}</strong><small>{note}</small></div>')
     return '<div class="metrics">' + ''.join(parts) + '</div>'
+
+
+def _budget(s, candidate=False):
+    result = s.get("wait_budget")
+    if result is None:
+        return ''
+    label, color = {
+        "exceeded": ("Budget exceeded", "bad"),
+        "within_sample": ("Within observed sample", "good"),
+        "no_samples": ("No completed waits", "caution"),
+    }[result["status"]]
+    title = "Candidate wait budget" if candidate else "Wait budget"
+    limits = ' · '.join(f'{name} ≤ {value:.9g} ms' for name, value in result['limits_ms'].items())
+    rows = []
+    for row in result["measurements"]:
+        status = ', '.join(row['exceeded']) + ' exceeded' if row['exceeded'] else 'Within sample'
+        rows.append(f'<tr data-kind="{row["kind"]}"><td class="dependency">{e(row["dependency"])}</td>'
+                    f'<td class="number">{row["waits"]}</td><td class="number">{row["max_ms"]:.9g}</td>'
+                    f'<td class="number">{row["p99_ms"]:.9g}</td><td class="{ "bad" if row["exceeded"] else "good" }">{e(status)}</td></tr>')
+    table = (f'<div class="comparison"><table><thead><tr><th>Dependency</th><th>Completed waits</th>'
+             f'<th>Max ms</th><th>p99 ms</th><th>Budget result</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+             if rows else '<p class="empty">No completed reportable waits; the budget could not be evaluated.</p>')
+    return (f'<section aria-label="{title}"><div class="section-head"><div><h2>{title}</h2><p>{e(limits)}</p></div>'
+            f'<span class="pill {color}">{label}</span></div>{table}<p class="scope">{e(result["scope"])}</p></section>')
 
 
 def _quality(s, name=None):
@@ -192,7 +216,7 @@ def render(s, name="trace.kev"):
 <h1>Find the delay.<br><em>Follow the evidence.</em></h1><p>Message passing and mutex dependencies, explained through QNX scheduling evidence.</p></div>
 <div class="hero-side"><span class="pill {color}">{verdict}</span><div class="source">{e(name)}</div>
 <span class="eyebrow">{e(s['trace']['system'])} · {e(s['trace']['machine'])}</span></div></header>'''
-    body += _metrics(s) + _quality(s) + _findings(s, filters=True) + _latencies(s)
+    body += _metrics(s) + _budget(s) + _quality(s) + _findings(s, filters=True) + _latencies(s)
     body += f'<p class="scope">{e(s["analysis"]["method"])} {e(s["analysis"]["scope"])}</p>'
     return _document(name, body)
 
@@ -235,7 +259,7 @@ def render_comparison(result, baseline_name="baseline.kev", candidate_name="cand
 <div class="hero-side"><span class="pill {color}">Measured direction: {e(direction)}</span>
 <div class="source">{e(baseline_name)}<br>↓<br>{e(candidate_name)}</div>
 <span class="eyebrow">{result['matched']} matched {'dependency' if result['matched'] == 1 else 'dependencies'} · {e(result['status'])} coverage</span></div></header>'''
-    body += _metrics(a, b)
+    body += _metrics(a, b) + _budget(b, candidate=True)
     if result["warnings"]:
         body += '<aside class="notice"><strong>Comparison limits</strong><ul>' + ''.join(f'<li>{e(w)}</li>' for w in result["warnings"]) + '</ul></aside>'
     body += ('<section><div class="section-head"><div><h2>What changed</h2><p>Sample counts stay visible. Disappearing work is never labeled fixed.</p></div>'

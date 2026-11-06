@@ -1,7 +1,7 @@
 """Compare captured behavior across runs, without treating new PIDs or lock addresses as regressions."""
 from collections import defaultdict
 
-from . import report
+from . import budget, report
 
 
 def _dependencies(mdl, summary):
@@ -29,9 +29,10 @@ def _dependencies(mdl, summary):
     return grouped
 
 
-def compare(before, after, process=None):
+def compare(before, after, process=None, *, max_wait_ms=None, p99_wait_ms=None):
     """Matched dependencies retain their measured sample sizes; absent work is never called fixed."""
-    baseline, candidate = report.summary(before, process), report.summary(after, process)
+    baseline = report.summary(before, process)
+    candidate = report.summary(after, process, max_wait_ms=max_wait_ms, p99_wait_ms=p99_wait_ms)
     old, new = _dependencies(before, baseline), _dependencies(after, candidate)
     rows, warnings = [], []
     for key in sorted(set(old) | set(new)):
@@ -78,6 +79,8 @@ def render(result, baseline_name="baseline", candidate_name="candidate"):
     out = [f"kevscope compare: {baseline_name} -> {candidate_name}",
            f"  {result['matched']} matched dependencies, {result['improvements']} improvements, "
            f"{result['regressions']} regressions/new findings", ""]
+    if "wait_budget" in result["candidate"]:
+        out.extend((budget.render(result["candidate"]["wait_budget"], candidate=True), ""))
     for row in result["groups"]:
         out.append(f"{row['kind'].upper()}  {row['dependency']} [{row['state']}; {row['change']}]")
         a, b = row["baseline"], row["candidate"]

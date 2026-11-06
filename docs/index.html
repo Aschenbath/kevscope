@@ -22,22 +22,35 @@ section{margin:38px 0}h2{font-size:24px;font-weight:500;letter-spacing:-.6px;mar
 .two>div{min-width:0}
 @media(max-width:760px){.wrap{padding:0 20px}.hero{grid-template-columns:1fr;gap:24px;padding-top:30px}.hero-side{border-left:0;border-top:1px solid var(--line);padding:18px 0 0}h1{letter-spacing:-1.5px}.metrics{grid-template-columns:1fr}.metric{padding:14px 0!important;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:0 14px}.metric+.metric{border-left:0;border-top:1px solid var(--line)}.metric strong{grid-column:2;grid-row:1/3;letter-spacing:-1px;font-size:30px}.metric small{grid-column:1;font-size:10px}.metrics .eyebrow{font-size:10px;letter-spacing:.03em}.section-head{align-items:start;flex-direction:column}.two{grid-template-columns:1fr;gap:12px}.finding>summary{padding:18px 16px}.finding .detail{padding:16px}.chain{gap:9px}.nav-note{max-width:140px}.timeline{min-width:650px}footer{flex-direction:column;gap:8px}}
 @media print{body{background:white}.wrap{padding:0}.filters{display:none}.hero{padding-top:20px}h1{font-size:38px}.finding{break-inside:avoid}.comparison{overflow:visible}.comparison table{min-width:0}.notice{background:white}.two{display:block}footer{padding-bottom:0}}
+
+.landing .hero{align-items:center;gap:0 48px;padding:42px 0 0}.landing .hero>div:first-child{padding-bottom:36px}.landing .hero-side{padding-left:28px;margin-bottom:36px}
+.landing .hero-side p{margin:12px 0}.landing .actions{display:flex;flex-wrap:wrap;align-items:center;gap:14px 22px;margin-top:25px}
+.landing .primary{display:inline-block;background:var(--green);color:white;padding:13px 18px;text-decoration:none;border-radius:3px;font-size:14px}
+.landing .primary:hover{background:#075544}.landing .secondary{font-size:13px;text-underline-offset:4px}
+.landing .metric strong{font-size:clamp(25px,2.8vw,36px);letter-spacing:-1.4px}.landing .metrics{grid-column:1/-1;margin-bottom:10px}
+.landing .sample-note{font-size:12px;color:var(--muted);max-width:850px;margin:12px 0 32px}
+.landing .proof{border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:16px 0;font:12px/1.8 var(--mono);color:var(--muted)}
+.landing .proof strong{color:var(--ink)}.landing .scenario{margin:17px 0;font:13px/1.9 var(--mono)}
+.landing .scenario span{display:block;border-bottom:1px solid var(--line);padding:5px 0}.landing pre{white-space:pre-wrap;overflow-wrap:anywhere}
+@media(max-width:760px){.landing .hero{display:flex;flex-direction:column;align-items:stretch;gap:0;padding:30px 0 0}.landing .hero>div:first-child{padding-bottom:24px}.landing .hero-side{order:2;padding:15px 0 0;margin:16px 0 0}.landing .metrics{order:1}.landing .metric{display:block;line-height:1.4;padding:10px 0!important}.landing .metric strong{font-size:32px;margin:5px 0}.landing .actions{gap:14px}.landing .two{gap:8px}}
 </style></head>
 <body><div class="wrap"><nav aria-label="Report identity"><div class="brand">kev<i>scope</i></div>
-<div class="nav-note">QNX KERNEL TRACE DIAGNOSTICS<br>Offline report · v0.3.1</div></nav>
-<main><header class="hero"><div><span class="eyebrow">QNX Global Hackathon / Developer Tooling &amp; Host Tools</span>
-<h1>Replay a real<br><em>QNX diagnosis.</em></h1><p>Explore kernel traces from a controlled QNX 8.0 workload. See what delayed the control thread, inspect the scheduling evidence, and compare the fix.</p></div>
-<div class="hero-side"><span class="pill good">Interactive examples</span><p>No account, SDK or installation needed to explore these reports.</p>
-<p><a href="https://youtu.be/I44O-XcHyqg">Watch the two-minute v0.3.1 demo ↗</a></p>
-<p><a href="https://github.com/Aschenbath/kevscope">Source, installation &amp; full tutorial ↗</a></p></div></header>
-<div class="metrics"><div class="metric"><span class="eyebrow">Captured on QNX</span><strong>6 traces</strong><small>QNX 8.0 · QEMU x86_64</small></div>
-<div class="metric"><span class="eyebrow">Decoder validation</span><strong>81,380</strong><small>Events matched against QNX traceprinter</small></div>
-<div class="metric"><span class="eyebrow">Runtime dependencies</span><strong>0</strong><small>Python 3.9+ · Standard library only</small></div></div>
-<section><h2>Choose a dependency</h2><p class="muted">Each workload uses control (priority 50), sensor (10), and logger (30). Compare channel or mutex priority inheritance, including IPC across processes and CPUs.</p>
-<div class="two" style="grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:20px"><article class="finding"><div class="detail"><span class="eyebrow">ipc priority inheritance</span>
-<h2>A reply from another process</h2><p>Control on CPU 1; a separate sensor process and logger on CPU 0.</p><p>25/100 affected waits → 0/100<br>
-Longest wait: <strong>9.119 → 2.495 ms</strong></p>
-<a href="examples/ipc.html">Explore the ipc comparison →</a></div></article><article class="finding"><div class="detail"><span class="eyebrow">mutex priority inheritance</span>
+<div class="nav-note">QNX KERNEL TRACE DIAGNOSTICS<br>Offline report · v0.3.2</div></nav>
+<main><div class="landing"><header class="hero"><div><span class="eyebrow">QNX kernel trace diagnostics / Interactive examples</span>
+<h1>A late reply.<br><em>An explained wait.</em></h1><p>Control waits on CPU 1. Its server is READY on CPU 0 while the logger runs. Follow the priority inversion and compare the fix.</p>
+<div class="actions"><a class="primary" href="examples/ipc.html">Inspect the evidence →</a>
+<a class="secondary" href="https://youtu.be/I44O-XcHyqg">2-min demo ↗</a></div></div>
+<div class="hero-side"><span class="pill good">Start with the captured evidence</span>
+<div class="scenario"><span>CPU 1 · control waits at priority 50</span><span>CPU 0 · sensor is READY at priority 10</span><span>CPU 0 · logger runs at priority 30</span></div>
+<p>Default priority inheritance lets sensor serve control at priority 50.</p>
+<p>No account, SDK or installation needed.</p></div>
+<div class="metrics"><div class="metric"><span class="eyebrow">Calls affected by inversion</span><strong>25/100<span class="arrow">→</span>0/100</strong><small>Before → after priority inheritance</small></div>
+<div class="metric"><span class="eyebrow">Longest MsgSend</span><strong>9.119<span class="arrow">→</span>2.495</strong><small>Milliseconds · completed calls</small></div>
+<div class="metric"><span class="eyebrow">Attributed scheduling delay</span><strong>92.446<span class="arrow">→</span>0.000</strong><small>Milliseconds · sum across affected calls</small></div></div></header>
+<p class="sample-note">Measured in the bundled one-second QNX 8.0 captures. The baseline has one unbounded READY interval, which remains visible as a coverage warning. These measurements describe this workload.</p>
+<div class="proof"><strong>6 QNX captures</strong> · <strong>81,380 events</strong> checked against QNX traceprinter · <strong>0 runtime dependencies</strong> · Python 3.9+</div>
+<section><h2>Follow another dependency</h2><p class="muted">The same three roles, with a mutex or a message channel inside one process.</p>
+<div class="two"><article class="finding"><div class="detail"><span class="eyebrow">mutex priority inheritance</span>
 <h2>A mutex owner that cannot finish</h2><p>Three threads in one process on CPU 0.</p><p>6/29 affected waits → 0/38<br>
 Longest wait: <strong>5.277 → 1.439 ms</strong></p>
 <a href="examples/mutex.html">Explore the mutex comparison →</a></div></article><article class="finding"><div class="detail"><span class="eyebrow">message priority inheritance</span>
@@ -47,8 +60,12 @@ Longest wait: <strong>8.219 → 2.260 ms</strong></p>
 <section><h2>Try it on the captured data</h2><p>Clone the repository and run these commands from its root:</p>
 <pre class="hint" style="overflow-x:auto"><code>python -m pip install .
 kevscope compare tests/data/ipc-inversion.kev tests/data/ipc-inherit.kev --process rtdemo --html comparison.html</code></pre>
-<p>Open <code>comparison.html</code> in a browser. Each report is a single file and works offline. For your own application, capture with <code>tracelogger -w</code>, then use <code>kevscope report</code> or <code>kevscope convert</code> for Perfetto.</p></section>
-<aside class="notice"><strong>What the evidence establishes</strong><p>These are controlled examples, not a guarantee for every workload. The detector excludes unresolved CPU migrations, unbounded READY intervals, missing priority evidence, and process-shared locks without object identity. A report with no identified inversion does not prove that every real-time deadline was met.</p></aside></main><footer><span>kevscope · Local analysis. No uploads or external resources.</span>
+<p>Open <code>comparison.html</code> in a browser. Each report is a single file and works offline.</p>
+<p><a href="https://github.com/Aschenbath/kevscope">Source, installation &amp; full tutorial ↗</a></p></section>
+<section><h2>Keep a wait budget in CI</h2><p>A capture can have zero inversions and still contain a wait that exceeds your budget. In v0.3.2, check each dependency's maximum or p99 wait:</p>
+<pre class="hint"><code>kevscope report tests/data/ipc-inherit.kev --process rtdemo --max-wait-ms 2 --json</code></pre>
+<p>This fixed capture has a 2.495 ms maximum wait, so the 2 ms check exits <code>3</code>. Limits are optional, use unrounded durations, and appear in text, JSON and offline HTML. A capture with no completed reportable waits exits <code>4</code>.</p></section>
+<aside class="notice"><strong>What the evidence establishes</strong><p>These are controlled examples, not a guarantee for every workload. The detector excludes unresolved CPU migrations, unbounded READY intervals, missing priority evidence, and process-shared locks without object identity. A report with no identified inversion does not prove that every real-time deadline was met. Budget checks apply to completed reportable waits; use <code>--strict</code> to also reject limited evidence.</p></aside></div></main><footer><span>kevscope · Local analysis. No uploads or external resources.</span>
 <span>Capture → Diagnose → Compare → Verify</span></footer></div><script>
 document.querySelectorAll('[data-filter]').forEach(button => {
   button.addEventListener('click', () => {

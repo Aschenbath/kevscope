@@ -6,6 +6,8 @@ Demo video (2 min, v0.3.1): https://youtu.be/I44O-XcHyqg
 
 The narrated demo follows cross-process IPC on two CPUs, inspects the same capture in Perfetto, compares mutex priority inheritance, and explains coverage warnings and wakeup counting. English subtitles are included.
 
+Version 0.3.2 adds optional wait budgets for CI and an examples page that starts with the measured IPC improvement. The video demonstrates the shared 0.3.1 workflow.
+
 [Interactive examples](https://aschenbath.github.io/kevscope/) · [Step-by-step tutorial](codelab/qnx-priority-inversion-perfetto/qnx-priority-inversion-perfetto.md) · [Hackathon submission](https://devpost.com/software/kevscope)
 
 QNX's `tracelogger` records every context switch, message and kernel call into a `.kev` file, normally inspected with the Momentics System Profiler. kevscope is a small host tool (Python 3.9+, standard library only) that:
@@ -14,6 +16,7 @@ QNX's `tracelogger` records every context switch, message and kernel call into a
 - **converts them to Perfetto** (`kevscope convert`), so you get CPU lanes, per-thread scheduling states, `MsgSend` → server → reply arrows, mutex waiter → owner arrows and a findings track in [ui.perfetto.dev](https://ui.perfetto.dev). It's the same free UI Android and Linux developers already use, and you can query the trace with SQL.
 - **finds real-time problems** (`kevscope report`): priority inversions through message passing and mutexes, including clients and servers in separate processes on different CPUs. Reports include the threads that ran instead, blocking times, pre-acceptance and accepted-to-reply phases, wake-up latency and CPU time. Mutex findings include the lock address and priority protocol. `--json` and `--fail-on-inversion` make it usable in CI.
 - **compares a fix** (`kevscope compare`): match dependencies across captures even when PIDs and mutex addresses change, compare affected-wait fractions and latency, and distinguish missing work from an improvement. `--fail-on-regression` supports CI.
+- **checks wait budgets** (`--max-wait-ms`, `--p99-wait-ms`): fail CI when a completed dependency wait exceeds the chosen limit, even with zero priority inversions. Compare checks the candidate capture; text, JSON and HTML retain the limits, sample counts and failures.
 - **shares inspectable evidence** (`--html report.html`): one offline HTML file with before/after metrics, the worst wait's exact CPU and priority intervals, filters, and capture-coverage warnings. No service or external assets are needed.
 
 ## Try a diagnosis without a QNX installation
@@ -141,9 +144,24 @@ tracelogger -s 1 -w -f /dev/shmem/trace.kev
 
 The report separates positive findings from evidence coverage. Dropped buffers, truncated records, missing priorities, unresolved lock owners, and ambiguous CPU migrations produce actionable warnings. Message ID collisions, missing receives, unexpected reply processes and unobserved receiver-to-replier handoffs are also excluded from causal attribution. A condition-variable wait begun before capture may lack its associated mutex arguments; this is reported separately from a missing wide-mode capture. Unfinished boundary waits are counted without inventing their full duration.
 
-Add `--strict` to `report` or `compare` to reject limited evidence or an incomplete comparison. Exit codes are **0** for a completed command, **1** for an input/output error, **2** for invalid command arguments, **3** for a requested inversion/regression check, and **4** for a strict coverage failure. Strict coverage takes precedence over code 3. Without these flags, exit 0 means the command ran successfully, not that the entire system met its deadlines.
+Add `--strict` to `report` or `compare` to reject limited evidence or an incomplete comparison. Exit codes are **0** for a completed command, **1** for an input/output error, **2** for invalid command arguments, **3** for a requested inversion/regression or wait-budget failure, and **4** for a strict coverage failure or a budget with no completed reportable waits. Strict coverage takes precedence over code 3. Without these flags, exit 0 means the command ran successfully, not that the entire system met its deadlines.
 
 Comparisons match process basenames and thread names (falling back to tids), ignoring capture-specific PIDs and mutex addresses. Multiple dependencies with the same role names are marked ambiguous. A dependency absent from the candidate is marked *not observed*, never fixed. Regression checks compare the fraction of affected waits, so merely recording more samples does not trigger a regression; latency changes are reported separately. Run comparable workloads and inspect sample counts.
+
+## Enforce wait budgets in CI
+
+Previously, `--fail-on-regression` only checked the fraction of waits affected by priority inversion. A dependency could have zero inversions and still take longer than your latency budget. Its meaning is unchanged; v0.3.2 adds two independent, optional limits:
+
+```sh
+kevscope report tests/data/ipc-inherit.kev --process rtdemo --max-wait-ms 2 --json
+kevscope compare before.kev after.kev --process my_app --max-wait-ms 5 --p99-wait-ms 3 --strict --html comparison.html
+```
+
+The first command exits **3**: the fixed IPC capture has no detected inversions, but its longest completed `MsgSend` is 2.495 ms, above 2 ms. A 3 ms limit passes the observed sample. The second checks each candidate dependency separately; no baseline budget is imposed. Either limit can be used alone or alongside the existing inversion checks.
+
+Limits must be finite positive milliseconds. A value equal to its limit passes; comparisons use unrounded durations, so a displayed `1.000 ms` wait can still exceed a `1.0003 ms` budget if the underlying duration is `1.0004 ms`. The p99 rule uses the report's existing nearest-index percentile independently for each dependency. All selected dependencies are checked, regardless of `--top`. JSON adds `wait_budget` to a report, or `candidate.wait_budget` to a comparison; it includes limits, unrounded measurements, sample counts, exceeded metrics and `exceeded`, `within_sample` or `no_samples` status. HTML and text show the same result before returning an exit code.
+
+These checks measure completed, reportable message and mutex waits, not full application cycles or wake-to-run latency. Incomplete waits, messages without a server identity, and mutex waits without an address remain outside the sample. No such waits means exit **4**, not a successful budget check; `--strict` additionally rejects the existing evidence/comparison warnings. Small samples do not establish a stable tail-latency estimate. The checks reuse the reconstructed waits and existing percentile calculations, without changing decoding, attribution or default comparison results.
 
 ## Reproduce the demo on QEMU
 
@@ -195,9 +213,9 @@ A wake-latency sample starts at a captured entry into READY from another non-run
 pip install pytest && pytest
 ```
 
-The 120 pytest cases cover six controlled QNX captures (`tests/data`) with gzipped `traceprinter` references; IPC identity collisions, reply handoffs and phase boundaries; address-space collisions and instantaneous priority changes; CPU migration counterexamples; wakeup updates, preemption, capture boundaries, cancelled waits and linear scan work; evidence coverage, comparison matching, CLI exits and HTML escaping; and real localhost transfer failures. Five Linux-only cases verify capture validation, build failure/timeout and snippet restoration (115 pass and 5 skip on Windows). The failure fixtures produce 29 same-process message, 6 mutex and 25 cross-process message inversions; the inheritance-enabled fixtures have none. Perfetto exports are independently checked with the official `trace_processor`.
+The 149 pytest cases cover six controlled QNX captures (`tests/data`) with gzipped `traceprinter` references; IPC identity collisions, reply handoffs and phase boundaries; address-space collisions and instantaneous priority changes; CPU migration counterexamples; wakeup updates, preemption, capture boundaries, cancelled waits and linear scan work; evidence coverage, comparison matching, CLI exits and HTML escaping; and real localhost transfer failures. Wait-budget cases cover zero-inversion failures, unrounded boundaries, per-dependency p99, empty samples, invalid limits, strict precedence and all three output formats. Five Linux-only cases verify capture validation, build failure/timeout and snippet restoration (144 pass and 5 skip on Windows). The failure fixtures produce 29 same-process message, 6 mutex and 25 cross-process message inversions; the inheritance-enabled fixtures have none. Perfetto exports are independently checked with the official `trace_processor`.
 
-CI runs on Linux and Windows with Python 3.9 and 3.14. Rebuild the public examples directly from the fixtures with `python demo/generate_examples.py`; generated reports contain relative trace time and no generation timestamp.
+CI runs on Linux and Windows with Python 3.9 and 3.14. Rebuild the public examples directly from the fixtures with `python demo/generate_examples.py`; generated reports contain relative trace time and no generation timestamp. The generator owns the landing-page copy, video link and measured figures, writes consistent LF newlines on both platforms, and CI checks its output against the committed pages. Edit the generator rather than only the generated HTML so regeneration preserves public entry points.
 
 The six fixtures redact capture and boot dates in their headers, zero the syspage's boot-time and wall-clock adjustment fields, and omit gzip timestamps. Their event payloads, relative timing and reference event output are unchanged. This metadata cleanup is specific to the controlled demo; it is not a general anonymizer for application traces.
 
